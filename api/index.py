@@ -3,7 +3,6 @@ from supabase import create_client, Client
 import requests
 import os
 from datetime import datetime
-import json
 import traceback
 
 app = Flask(__name__, template_folder='../templates')
@@ -31,6 +30,7 @@ def dashboard():
         print(f"Error Dashboard: {e}")
         chats = []
 
+    # --- PERHITUNGAN MURNI (STRICT) ---
     sent_count = 0
     read_count = 0
     reply_count = 0
@@ -39,11 +39,15 @@ def dashboard():
         direction = c.get('direction')
         status = str(c.get('status')).lower()
         
+        # Hitung Pesan Keluar
         if direction == 'outbound':
             sent_count += 1
-            # Hitung 'read' atau '3' (kode Fonnte)
+            # HANYA hitung 'Read' jika statusnya benar-benar 'read' atau '3'
+            # Tidak ada asumsi "kalau balas berarti baca"
             if 'read' in status or '3' in status:
                 read_count += 1
+                
+        # Hitung Balasan Masuk
         elif direction == 'inbound':
             reply_count += 1
             
@@ -64,9 +68,11 @@ def send_message():
     fonnte_id = None
     status_awal = "sent"
     
+    # Kirim ke Fonnte
     try:
         req = requests.post('https://api.fonnte.com/send', headers=headers, data=data)
         res_json = req.json()
+        # Ambil ID Fonnte (Penting untuk tracking status Read nanti)
         if 'id' in res_json and isinstance(res_json['id'], list) and len(res_json['id']) > 0:
             fonnte_id = res_json['id'][0]
         if not fonnte_id and 'data' in res_json and isinstance(res_json['data'], list) and len(res_json['data']) > 0:
@@ -74,6 +80,7 @@ def send_message():
     except:
         pass
     
+    # Simpan ke Database
     try:
         supabase.table('chats').insert({
             "customer_phone": phone, 
@@ -100,22 +107,20 @@ def webhook():
         
         # Translate kode angka Fonnte
         final_status = str(raw_status)
-        if str(raw_status) == '2': final_status = 'delivered'
-        if str(raw_status) == '3': final_status = 'read'
+        if str(raw_status) == '2': final_status = 'delivered' # Terkirim (Abu)
+        if str(raw_status) == '3': final_status = 'read'      # Dibaca (Biru)
 
-        # KASUS A: UPDATE STATUS VIA ID (Jalur Resmi)
+        # KASUS A: UPDATE STATUS (Jika ada ID)
         if msg_id and raw_status:
             print(f"Update Status ID {msg_id} -> {final_status}")
             supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
 
-        # KASUS B: PESAN BALASAN MASUK (Jalur Alternatif)
+        # KASUS B: PESAN BALASAN MASUK
         sender = data.get('sender')
         message = data.get('message')
         
         if sender and message:
             sender = normalize_phone(sender)
-            
-            # 1. Simpan Balasan
             existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', sender).limit(1).execute()
             if not existing.data:
                 supabase.table('chats').insert({
@@ -124,18 +129,6 @@ def webhook():
                     "direction": "inbound",
                     "status": "received"
                 }).execute()
-                
-            # 2. LOGIKA CERDAS: Kalau DIBALAS, berarti PASTI DIBACA!
-            # Kita paksa update pesan terakhir ke nomor ini jadi 'read'
-            try:
-                print(f"Ada balasan dari {sender}, auto-update status jadi READ...")
-                supabase.table('chats').update({'status': 'read'})\
-                    .eq('customer_phone', sender)\
-                    .eq('direction', 'outbound')\
-                    .neq('status', 'read')\
-                    .execute()
-            except Exception as e:
-                print(f"Gagal Auto-Read: {e}")
                 
     except Exception as e:
         print(f"ERROR: {e}")
