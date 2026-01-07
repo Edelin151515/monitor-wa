@@ -4,7 +4,7 @@ import requests
 import os
 from datetime import datetime
 import json
-import traceback # Import untuk melacak error
+import traceback
 
 app = Flask(__name__, template_folder='../templates')
 
@@ -31,9 +31,22 @@ def dashboard():
         print(f"Error Dashboard: {e}")
         chats = []
 
-    sent_count = sum(1 for c in chats if c.get('direction') == 'outbound')
-    read_count = sum(1 for c in chats if c.get('status') and 'read' in c.get('status').lower())
-    reply_count = sum(1 for c in chats if c.get('direction') == 'inbound')
+    # LOGIKA HITUNG BARU (Support Angka & Huruf)
+    sent_count = 0
+    read_count = 0
+    reply_count = 0
+    
+    for c in chats:
+        direction = c.get('direction')
+        status = str(c.get('status')).lower() # Ubah ke string biar aman
+        
+        if direction == 'outbound':
+            sent_count += 1
+            # Cek 'read' (huruf) ATAU '3' (angka kode read)
+            if 'read' in status or '3' in status:
+                read_count += 1
+        elif direction == 'inbound':
+            reply_count += 1
             
     stats = {'sent': sent_count, 'read': read_count, 'replied': reply_count}
     replies = [c for c in chats if c.get('direction') == 'inbound']
@@ -49,85 +62,83 @@ def send_message():
     headers = {'Authorization': FONNTE_TOKEN}
     data = {'target': phone, 'message': message}
     
-    try:
-        requests.post('https://api.fonnte.com/send', headers=headers, data=data)
-    except:
-        pass
+    fonnte_id = None # Siapkan wadah ID
+    status_awal = "sent"
     
     try:
+        # KIRIM & TANGKAP ID DARI FONNTE
+        req = requests.post('https://api.fonnte.com/send', headers=headers, data=data)
+        res_json = req.json()
+        print(f"RESPON FONNTE: {res_json}") # Cek log ini nanti
+        
+        # Fonnte mengembalikan ID dalam list, misal: {'id': ['123ABC...']}
+        if 'id' in res_json and len(res_json['id']) > 0:
+            fonnte_id = res_json['id'][0]
+            
+    except Exception as e:
+        print(f"Error Kirim: {e}")
+        status_awal = "failed"
+    
+    try:
+        # SIMPAN ID KE DATABASE (PENTING!)
         supabase.table('chats').insert({
             "customer_phone": phone, 
             "message": message,
             "direction": "outbound",
-            "status": "sent"
+            "status": status_awal,
+            "fonnte_id": fonnte_id # <--- KITA SIMPAN TIKETNYA DI SINI
         }).execute()
     except Exception as e:
-        print(f"Error Simpan: {e}")
+        print(f"Error Simpan DB: {e}")
     
     return redirect(url_for('dashboard'))
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
-    # WRAP SEMUA DALAM TRY AGAR TIDAK ERROR 500
     try:
-        data = request.json
-        if not data:
-            data = request.form
-        
+        data = request.json or request.form
         if not data: return "No Data", 200
 
-        print(f"DEBUG DATA MASUK: {data}") # Cek log ini nanti
+        print(f"WEBHOOK MASUK: {data}") # Lihat log
 
-        remote_jid = data.get('remoteJid')
+        # --- 1. TANGKAP ID & STATUS ---
+        # Fonnte pakai 'stateid' atau 'id' untuk ID pesan
+        msg_id = data.get('stateid') or data.get('id')
+        
+        # Fonnte pakai 'state' atau 'status' untuk statusnya
+        raw_status = data.get('state') or data.get('status')
+        
+        # Konversi Status Angka ke Kata (Opsional, tapi biar rapi di DB)
+        final_status = str(raw_status)
+        if str(raw_status) == '2': final_status = 'delivered'
+        if str(raw_status) == '3': final_status = 'read' # <--- INI KUNCINYA
+
+        # --- KASUS A: UPDATE STATUS (Pakai ID, Gak Butuh Nomor HP) ---
+        if msg_id and raw_status:
+            print(f"Update Status ID {msg_id} menjadi {final_status}")
+            # Update database berdasarkan fonnte_id
+            supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
+
+        # --- KASUS B: PESAN BALASAN MASUK (Ada Sender) ---
         sender = data.get('sender')
         message = data.get('message')
-        status = data.get('status') or data.get('state')
         
-        # Logika Penentuan Nomor
-        nomor_masuk = None
-        if remote_jid:
-            nomor_masuk = str(remote_jid).split('@')[0]
-        elif sender:
-            nomor_masuk = sender
+        if sender and message:
+            # Bersihkan nomor pengirim
+            sender = normalize_phone(sender)
             
-        nomor_masuk = normalize_phone(nomor_masuk)
-        
-        # KASUS 1: UPDATE STATUS BACA (READ)
-        if status and 'read' in str(status).lower() and nomor_masuk:
-            print(f"Mencoba update READ untuk nomor: {nomor_masuk}")
-            
-            # Cari pesan TERAKHIR ke nomor ini
-            last_msg = supabase.table('chats').select('id')\
-                .eq('customer_phone', nomor_masuk)\
-                .eq('direction', 'outbound')\
-                .neq('status', 'read')\
-                .order('created_at', desc=True)\
-                .limit(1).execute()
-            
-            if last_msg.data:
-                msg_id = last_msg.data[0]['id']
-                supabase.table('chats').update({'status': 'read'}).eq('id', msg_id).execute()
-                print(f"BERHASIL UPDATE READ ID: {msg_id}")
-            else:
-                print(f"SKIP: Tidak ada pesan pending untuk {nomor_masuk}")
-
-        # KASUS 2: PESAN BALASAN MASUK
-        if nomor_masuk and message and (not status or status == 'received'):
-            # Cek duplikasi
-            existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', nomor_masuk).limit(1).execute()
+            # Simpan balasan (Cek duplikat dulu)
+            existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', sender).limit(1).execute()
             if not existing.data:
                 supabase.table('chats').insert({
-                    "customer_phone": nomor_masuk,
+                    "customer_phone": sender,
                     "message": message,
                     "direction": "inbound",
                     "status": "received"
                 }).execute()
-                print("Balasan tersimpan.")
-
+                
     except Exception as e:
-        # INI PENTING: Kalau error, print errornya tapi JANGAN bikin server mati (tetap return 200)
-        print(f"CRASH DI WEBHOOK: {e}")
-        traceback.print_exc() # Print detail error
-        return "Error Handled", 200
+        print(f"ERROR WEBHOOK: {e}")
+        traceback.print_exc()
 
     return "OK", 200
