@@ -42,7 +42,7 @@ def dashboard():
         
         if direction == 'outbound':
             sent_count += 1
-            # Cek 'read' (huruf) ATAU '3' (angka kode read)
+            # Cek 'read' (huruf) ATAU '3' (angka kode read dari Fonnte)
             if 'read' in status or '3' in status:
                 read_count += 1
         elif direction == 'inbound':
@@ -71,10 +71,17 @@ def send_message():
         res_json = req.json()
         print(f"RESPON FONNTE: {res_json}") # Cek log ini nanti
         
-        # Fonnte mengembalikan ID dalam list, misal: {'id': ['123ABC...']}
-        if 'id' in res_json and len(res_json['id']) > 0:
+        # Fonnte ID bisa ada di 'id' (list) atau di dalam 'data' (list of dict)
+        # CARA 1: Cek list 'id'
+        if 'id' in res_json and isinstance(res_json['id'], list) and len(res_json['id']) > 0:
             fonnte_id = res_json['id'][0]
-            
+        
+        # CARA 2: Cek list 'data' (Backup)
+        if not fonnte_id and 'data' in res_json and isinstance(res_json['data'], list) and len(res_json['data']) > 0:
+             fonnte_id = res_json['data'][0].get('id')
+
+        print(f"ID TIKET DITANGKAP: {fonnte_id}")
+
     except Exception as e:
         print(f"Error Kirim: {e}")
         status_awal = "failed"
@@ -117,7 +124,8 @@ def webhook():
         if msg_id and raw_status:
             print(f"Update Status ID {msg_id} menjadi {final_status}")
             # Update database berdasarkan fonnte_id
-            supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
+            response = supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
+            print(f"Database Updated: {response.data}")
 
         # --- KASUS B: PESAN BALASAN MASUK (Ada Sender) ---
         sender = data.get('sender')
