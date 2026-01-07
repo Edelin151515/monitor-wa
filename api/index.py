@@ -13,6 +13,14 @@ FONNTE_TOKEN = os.environ.get("FONNTE_TOKEN")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# FUNGSI PENTING: Ubah 08 jadi 62
+def normalize_phone(phone):
+    if not phone: return ""
+    phone = str(phone).strip().replace('-', '').replace(' ', '')
+    if phone.startswith('0'):
+        return '62' + phone[1:]
+    return phone
+
 @app.route('/')
 def dashboard():
     today = datetime.now().strftime('%Y-%m-%d')
@@ -23,9 +31,8 @@ def dashboard():
         print(f"Error Dashboard: {e}")
         chats = []
 
-    # Statistik
     sent_count = sum(1 for c in chats if c.get('direction') == 'outbound')
-    # Hitung Read (case insensitive)
+    # Hitung Read lebih fleksibel
     read_count = sum(1 for c in chats if c.get('status') and 'read' in c.get('status').lower())
     reply_count = sum(1 for c in chats if c.get('direction') == 'inbound')
             
@@ -36,8 +43,11 @@ def dashboard():
 
 @app.route('/send', methods=['POST'])
 def send_message():
-    phone = request.form.get('phone')
+    raw_phone = request.form.get('phone')
     message = request.form.get('message')
+    
+    # 1. FORMAT NOMOR DULU (Supaya cocok dengan laporan Fonnte nanti)
+    phone = normalize_phone(raw_phone)
     
     headers = {'Authorization': FONNTE_TOKEN}
     data = {'target': phone, 'message': message}
@@ -48,8 +58,9 @@ def send_message():
         pass
     
     try:
+        # Simpan dengan nomor yang sudah diformat (62...)
         supabase.table('chats').insert({
-            "customer_phone": phone,
+            "customer_phone": phone, 
             "message": message,
             "direction": "outbound",
             "status": "sent"
@@ -64,25 +75,31 @@ def webhook():
     data = request.json or request.form
     if not data: return "No Data", 200
 
-    print(f"WEBHOOK: {data}")
+    print(f"WEBHOOK RAW: {data}")
 
-    # 1. AMBIL NOMOR HP (INILAH PERBAIKANNYA)
-    # Kalau pesan masuk, nomor ada di 'sender'.
-    # Kalau status update, nomor ada di 'remoteJid' (format: 628123...@s.whatsapp.net)
-    nomor_hp = data.get('sender')
-    if not nomor_hp and data.get('remoteJid'):
-        nomor_hp = data.get('remoteJid').split('@')[0] # Ambil angka depannya saja
-
+    # Ambil nomor dari berbagai kemungkinan field Fonnte
+    sender = data.get('sender')
+    remote_jid = data.get('remoteJid')
+    
+    nomor_masuk = None
+    if sender:
+        nomor_masuk = sender
+    elif remote_jid:
+        nomor_masuk = remote_jid.split('@')[0] # Ambil angka depan dari 628xx@s.whatsapp.net
+        
+    # Pastikan formatnya bersih
+    nomor_masuk = normalize_phone(nomor_masuk)
+    
     message = data.get('message')
     status = data.get('status') or data.get('state')
 
     # KASUS 1: UPDATE STATUS BACA (READ)
-    if status and 'read' in status.lower() and nomor_hp:
-        print(f"Laporan READ dari {nomor_hp}")
+    if status and 'read' in status.lower() and nomor_masuk:
+        print(f"Mencocokkan laporan READ dari: {nomor_masuk}")
         try:
-            # Cari pesan TERAKHIR ke nomor ini yang belum dibaca
+            # Cari pesan TERAKHIR ke nomor (62...) ini
             last_msg = supabase.table('chats').select('id')\
-                .eq('customer_phone', nomor_hp)\
+                .eq('customer_phone', nomor_masuk)\
                 .eq('direction', 'outbound')\
                 .neq('status', 'read')\
                 .order('created_at', desc=True)\
@@ -91,17 +108,19 @@ def webhook():
             if last_msg.data:
                 msg_id = last_msg.data[0]['id']
                 supabase.table('chats').update({'status': 'read'}).eq('id', msg_id).execute()
-                print("Database berhasil diupdate jadi READ")
+                print(f"BERHASIL: Pesan ID {msg_id} status jadi READ")
+            else:
+                print("GAGAL: Tidak menemukan pesan outbound untuk nomor ini di DB.")
         except Exception as e:
-            print(f"Gagal Update Read: {e}")
+            print(f"Error DB Update: {e}")
 
     # KASUS 2: PESAN BALASAN MASUK
-    if nomor_hp and message and (not status or status == 'received'):
+    if nomor_masuk and message and (not status or status == 'received'):
         try:
-            existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', nomor_hp).limit(1).execute()
+            existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', nomor_masuk).limit(1).execute()
             if not existing.data:
                 supabase.table('chats').insert({
-                    "customer_phone": nomor_hp,
+                    "customer_phone": nomor_masuk,
                     "message": message,
                     "direction": "inbound",
                     "status": "received"
