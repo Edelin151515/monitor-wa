@@ -2,7 +2,7 @@ from flask import Flask, request, render_template, redirect, url_for
 from supabase import create_client, Client
 import requests
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 
 app = Flask(__name__, template_folder='../templates')
@@ -22,39 +22,73 @@ def normalize_phone(phone):
 
 @app.route('/')
 def dashboard():
-    today = datetime.now().strftime('%Y-%m-%d')
+    # 1. AMBIL TANGGAL DARI PILIHAN USER (Default: Hari Ini)
+    selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+    
+    # Hitung batas waktu untuk filter database (Hari H 00:00 s/d Besok 00:00)
     try:
-        response = supabase.table('chats').select("*").gte('created_at', today).order('created_at', desc=True).execute()
+        date_obj = datetime.strptime(selected_date_str, '%Y-%m-%d')
+        next_day_str = (date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+    except:
+        selected_date_str = datetime.now().strftime('%Y-%m-%d')
+        next_day_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+
+    try:
+        # Query: Ambil data HANYA pada tanggal yang dipilih
+        response = supabase.table('chats').select("*")\
+            .gte('created_at', selected_date_str)\
+            .lt('created_at', next_day_str)\
+            .order('created_at', desc=True)\
+            .execute()
         chats = response.data
     except Exception as e:
         print(f"Error Dashboard: {e}")
         chats = []
 
-    # --- PERHITUNGAN MURNI (STRICT) ---
+    # --- LOGIKA POTENSIAL BARU ---
     sent_count = 0
-    read_count = 0
+    delivered_count = 0 # Menggantikan "Dibaca" yg error
     reply_count = 0
     
+    # Set untuk menampung nomor yang membalas
+    nomor_yang_balas = set()
     for c in chats:
-        direction = c.get('direction')
-        status = str(c.get('status')).lower()
-        
-        # Hitung Pesan Keluar
-        if direction == 'outbound':
-            sent_count += 1
-            # HANYA hitung 'Read' jika statusnya benar-benar 'read' atau '3'
-            # Tidak ada asumsi "kalau balas berarti baca"
-            if 'read' in status or '3' in status:
-                read_count += 1
-                
-        # Hitung Balasan Masuk
-        elif direction == 'inbound':
+        if c.get('direction') == 'inbound':
             reply_count += 1
+            if c.get('customer_phone'):
+                nomor_yang_balas.add(c.get('customer_phone'))
+
+    # List untuk Nasabah Potensial (Sudah terkirim, tapi belum balas)
+    potential_leads = []
+
+    for c in chats:
+        if c.get('direction') == 'outbound':
+            sent_count += 1
+            status = str(c.get('status')).lower()
+            nomor = c.get('customer_phone')
             
-    stats = {'sent': sent_count, 'read': read_count, 'replied': reply_count}
+            # Cek Status Terkirim (Valid)
+            # Kode 2 (Delivered), 3 (Read), atau kata 'delivered'/'read'
+            is_delivered = 'delivered' in status or 'read' in status or '2' in status or '3' in status
+            
+            if is_delivered:
+                delivered_count += 1
+                # LOGIKA POTENSIAL:
+                # Jika sudah terkirim (valid) DAN nomornya TIDAK ada di daftar pembalas
+                if nomor not in nomor_yang_balas:
+                    # Cek supaya tidak double di list
+                    if not any(d['phone'] == nomor for d in potential_leads):
+                         potential_leads.append({'phone': nomor, 'msg': c.get('message'), 'status': status})
+
+    stats = {
+        'sent': sent_count, 
+        'valid': delivered_count, # Valid = Pesan Nyampe (Centang 2)
+        'replied': reply_count
+    }
+    
     replies = [c for c in chats if c.get('direction') == 'inbound']
     
-    return render_template('dashboard.html', stats=stats, replies=replies)
+    return render_template('dashboard.html', stats=stats, replies=replies, potential=potential_leads, selected_date=selected_date_str)
 
 @app.route('/send', methods=['POST'])
 def send_message():
@@ -68,11 +102,9 @@ def send_message():
     fonnte_id = None
     status_awal = "sent"
     
-    # Kirim ke Fonnte
     try:
         req = requests.post('https://api.fonnte.com/send', headers=headers, data=data)
         res_json = req.json()
-        # Ambil ID Fonnte (Penting untuk tracking status Read nanti)
         if 'id' in res_json and isinstance(res_json['id'], list) and len(res_json['id']) > 0:
             fonnte_id = res_json['id'][0]
         if not fonnte_id and 'data' in res_json and isinstance(res_json['data'], list) and len(res_json['data']) > 0:
@@ -80,7 +112,6 @@ def send_message():
     except:
         pass
     
-    # Simpan ke Database
     try:
         supabase.table('chats').insert({
             "customer_phone": phone, 
@@ -100,22 +131,16 @@ def webhook():
         data = request.json or request.form
         if not data: return "No Data", 200
 
-        print(f"WEBHOOK: {data}")
-
         msg_id = data.get('stateid') or data.get('id')
         raw_status = data.get('state') or data.get('status')
         
-        # Translate kode angka Fonnte
         final_status = str(raw_status)
-        if str(raw_status) == '2': final_status = 'delivered' # Terkirim (Abu)
-        if str(raw_status) == '3': final_status = 'read'      # Dibaca (Biru)
+        if str(raw_status) == '2': final_status = 'delivered'
+        if str(raw_status) == '3': final_status = 'read'
 
-        # KASUS A: UPDATE STATUS (Jika ada ID)
         if msg_id and raw_status:
-            print(f"Update Status ID {msg_id} -> {final_status}")
             supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
 
-        # KASUS B: PESAN BALASAN MASUK
         sender = data.get('sender')
         message = data.get('message')
         
@@ -131,7 +156,6 @@ def webhook():
                 }).execute()
                 
     except Exception as e:
-        print(f"ERROR: {e}")
         traceback.print_exc()
 
     return "OK", 200
