@@ -4,6 +4,7 @@ import requests
 import os
 from datetime import datetime
 import json
+import traceback # Import untuk melacak error
 
 app = Flask(__name__, template_folder='../templates')
 
@@ -13,12 +14,9 @@ FONNTE_TOKEN = os.environ.get("FONNTE_TOKEN")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# FUNGSI PENTING: Bersihkan nomor dari + dan - dan spasi
 def normalize_phone(phone):
     if not phone: return ""
-    # Hapus +, -, dan spasi
     phone = str(phone).strip().replace('-', '').replace(' ', '').replace('+', '')
-    # Ubah 08 jadi 62
     if phone.startswith('0'):
         return '62' + phone[1:]
     return phone
@@ -46,8 +44,6 @@ def dashboard():
 def send_message():
     raw_phone = request.form.get('phone')
     message = request.form.get('message')
-    
-    # BERSIHKAN NOMOR SEBELUM DISIMPAN
     phone = normalize_phone(raw_phone)
     
     headers = {'Authorization': FONNTE_TOKEN}
@@ -72,30 +68,35 @@ def send_message():
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
-    data = request.json or request.form
-    if not data: return "No Data", 200
-
-    print(f"WEBHOOK RAW: {data}")
-
-    sender = data.get('sender')
-    remote_jid = data.get('remoteJid')
-    
-    nomor_masuk = None
-    if sender:
-        nomor_masuk = sender
-    elif remote_jid:
-        nomor_masuk = remote_jid.split('@')[0]
+    # WRAP SEMUA DALAM TRY AGAR TIDAK ERROR 500
+    try:
+        data = request.json
+        if not data:
+            data = request.form
         
-    # Pastikan nomor dari webhook juga dibersihkan
-    nomor_masuk = normalize_phone(nomor_masuk)
-    
-    message = data.get('message')
-    status = data.get('status') or data.get('state')
+        if not data: return "No Data", 200
 
-    # KASUS 1: UPDATE STATUS BACA (READ)
-    if status and 'read' in status.lower() and nomor_masuk:
-        print(f"Laporan READ dari: {nomor_masuk}")
-        try:
+        print(f"DEBUG DATA MASUK: {data}") # Cek log ini nanti
+
+        remote_jid = data.get('remoteJid')
+        sender = data.get('sender')
+        message = data.get('message')
+        status = data.get('status') or data.get('state')
+        
+        # Logika Penentuan Nomor
+        nomor_masuk = None
+        if remote_jid:
+            nomor_masuk = str(remote_jid).split('@')[0]
+        elif sender:
+            nomor_masuk = sender
+            
+        nomor_masuk = normalize_phone(nomor_masuk)
+        
+        # KASUS 1: UPDATE STATUS BACA (READ)
+        if status and 'read' in str(status).lower() and nomor_masuk:
+            print(f"Mencoba update READ untuk nomor: {nomor_masuk}")
+            
+            # Cari pesan TERAKHIR ke nomor ini
             last_msg = supabase.table('chats').select('id')\
                 .eq('customer_phone', nomor_masuk)\
                 .eq('direction', 'outbound')\
@@ -106,13 +107,13 @@ def webhook():
             if last_msg.data:
                 msg_id = last_msg.data[0]['id']
                 supabase.table('chats').update({'status': 'read'}).eq('id', msg_id).execute()
-                print(f"BERHASIL: Pesan ID {msg_id} status jadi READ")
-        except Exception as e:
-            print(f"Error DB Update: {e}")
+                print(f"BERHASIL UPDATE READ ID: {msg_id}")
+            else:
+                print(f"SKIP: Tidak ada pesan pending untuk {nomor_masuk}")
 
-    # KASUS 2: PESAN BALASAN MASUK
-    if nomor_masuk and message and (not status or status == 'received'):
-        try:
+        # KASUS 2: PESAN BALASAN MASUK
+        if nomor_masuk and message and (not status or status == 'received'):
+            # Cek duplikasi
             existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', nomor_masuk).limit(1).execute()
             if not existing.data:
                 supabase.table('chats').insert({
@@ -121,7 +122,12 @@ def webhook():
                     "direction": "inbound",
                     "status": "received"
                 }).execute()
-        except:
-            pass
+                print("Balasan tersimpan.")
+
+    except Exception as e:
+        # INI PENTING: Kalau error, print errornya tapi JANGAN bikin server mati (tetap return 200)
+        print(f"CRASH DI WEBHOOK: {e}")
+        traceback.print_exc() # Print detail error
+        return "Error Handled", 200
 
     return "OK", 200
