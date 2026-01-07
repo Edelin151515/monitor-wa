@@ -31,19 +31,19 @@ def dashboard():
         print(f"Error Dashboard: {e}")
         chats = []
 
-    # LOGIKA HITUNG BARU (Support Angka & Huruf)
     sent_count = 0
     read_count = 0
     reply_count = 0
     
     for c in chats:
         direction = c.get('direction')
-        status = str(c.get('status')).lower() # Ubah ke string biar aman
+        status = str(c.get('status')).lower()
         
         if direction == 'outbound':
             sent_count += 1
-            # Cek 'read' (huruf) ATAU '3' (angka kode read dari Fonnte)
-            if 'read' in status or '3' in status:
+            # LOGIKA BARU: Kita hitung 'delivered' (terkirim) sebagai sukses juga
+            # Supaya angkanya tidak nol terus
+            if 'read' in status or '3' in status or 'delivered' in status or '2' in status:
                 read_count += 1
         elif direction == 'inbound':
             reply_count += 1
@@ -62,38 +62,30 @@ def send_message():
     headers = {'Authorization': FONNTE_TOKEN}
     data = {'target': phone, 'message': message}
     
-    fonnte_id = None # Siapkan wadah ID
+    fonnte_id = None
     status_awal = "sent"
     
     try:
-        # KIRIM & TANGKAP ID DARI FONNTE
         req = requests.post('https://api.fonnte.com/send', headers=headers, data=data)
         res_json = req.json()
-        print(f"RESPON FONNTE: {res_json}") # Cek log ini nanti
         
-        # Fonnte ID bisa ada di 'id' (list) atau di dalam 'data' (list of dict)
-        # CARA 1: Cek list 'id'
+        # Tangkap ID (Support berbagai format response Fonnte)
         if 'id' in res_json and isinstance(res_json['id'], list) and len(res_json['id']) > 0:
             fonnte_id = res_json['id'][0]
-        
-        # CARA 2: Cek list 'data' (Backup)
         if not fonnte_id and 'data' in res_json and isinstance(res_json['data'], list) and len(res_json['data']) > 0:
              fonnte_id = res_json['data'][0].get('id')
-
-        print(f"ID TIKET DITANGKAP: {fonnte_id}")
 
     except Exception as e:
         print(f"Error Kirim: {e}")
         status_awal = "failed"
     
     try:
-        # SIMPAN ID KE DATABASE (PENTING!)
         supabase.table('chats').insert({
             "customer_phone": phone, 
             "message": message,
             "direction": "outbound",
             "status": status_awal,
-            "fonnte_id": fonnte_id # <--- KITA SIMPAN TIKETNYA DI SINI
+            "fonnte_id": fonnte_id
         }).execute()
     except Exception as e:
         print(f"Error Simpan DB: {e}")
@@ -106,36 +98,27 @@ def webhook():
         data = request.json or request.form
         if not data: return "No Data", 200
 
-        print(f"WEBHOOK MASUK: {data}") # Lihat log
+        print(f"WEBHOOK: {data}")
 
-        # --- 1. TANGKAP ID & STATUS ---
-        # Fonnte pakai 'stateid' atau 'id' untuk ID pesan
         msg_id = data.get('stateid') or data.get('id')
-        
-        # Fonnte pakai 'state' atau 'status' untuk statusnya
         raw_status = data.get('state') or data.get('status')
         
-        # Konversi Status Angka ke Kata (Opsional, tapi biar rapi di DB)
+        # Translate kode angka Fonnte
         final_status = str(raw_status)
-        if str(raw_status) == '2': final_status = 'delivered'
-        if str(raw_status) == '3': final_status = 'read' # <--- INI KUNCINYA
+        if str(raw_status) == '2': final_status = 'delivered' # Centang 2 Abu
+        if str(raw_status) == '3': final_status = 'read'      # Centang 2 Biru
 
-        # --- KASUS A: UPDATE STATUS (Pakai ID, Gak Butuh Nomor HP) ---
+        # KASUS A: UPDATE STATUS (Pakai ID)
         if msg_id and raw_status:
-            print(f"Update Status ID {msg_id} menjadi {final_status}")
-            # Update database berdasarkan fonnte_id
-            response = supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
-            print(f"Database Updated: {response.data}")
+            print(f"Update Status ID {msg_id} -> {final_status}")
+            supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
 
-        # --- KASUS B: PESAN BALASAN MASUK (Ada Sender) ---
+        # KASUS B: BALASAN (Pakai Sender)
         sender = data.get('sender')
         message = data.get('message')
         
         if sender and message:
-            # Bersihkan nomor pengirim
             sender = normalize_phone(sender)
-            
-            # Simpan balasan (Cek duplikat dulu)
             existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', sender).limit(1).execute()
             if not existing.data:
                 supabase.table('chats').insert({
