@@ -41,7 +41,7 @@ def dashboard():
         
         if direction == 'outbound':
             sent_count += 1
-            # LOGIKA JUJUR: Hanya hitung jika status benar-benar READ
+            # Hitung 'read' atau '3' (kode Fonnte)
             if 'read' in status or '3' in status:
                 read_count += 1
         elif direction == 'inbound':
@@ -100,19 +100,22 @@ def webhook():
         
         # Translate kode angka Fonnte
         final_status = str(raw_status)
-        if str(raw_status) == '2': final_status = 'delivered' # Centang 2 Abu
-        if str(raw_status) == '3': final_status = 'read'      # Centang 2 Biru (INI YANG KITA CARI)
+        if str(raw_status) == '2': final_status = 'delivered'
+        if str(raw_status) == '3': final_status = 'read'
 
-        # UPDATE STATUS
+        # KASUS A: UPDATE STATUS VIA ID (Jalur Resmi)
         if msg_id and raw_status:
             print(f"Update Status ID {msg_id} -> {final_status}")
             supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
 
-        # PESAN MASUK
+        # KASUS B: PESAN BALASAN MASUK (Jalur Alternatif)
         sender = data.get('sender')
         message = data.get('message')
+        
         if sender and message:
             sender = normalize_phone(sender)
+            
+            # 1. Simpan Balasan
             existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', sender).limit(1).execute()
             if not existing.data:
                 supabase.table('chats').insert({
@@ -121,6 +124,18 @@ def webhook():
                     "direction": "inbound",
                     "status": "received"
                 }).execute()
+                
+            # 2. LOGIKA CERDAS: Kalau DIBALAS, berarti PASTI DIBACA!
+            # Kita paksa update pesan terakhir ke nomor ini jadi 'read'
+            try:
+                print(f"Ada balasan dari {sender}, auto-update status jadi READ...")
+                supabase.table('chats').update({'status': 'read'})\
+                    .eq('customer_phone', sender)\
+                    .eq('direction', 'outbound')\
+                    .neq('status', 'read')\
+                    .execute()
+            except Exception as e:
+                print(f"Gagal Auto-Read: {e}")
                 
     except Exception as e:
         print(f"ERROR: {e}")
