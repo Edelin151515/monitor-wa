@@ -13,10 +13,12 @@ FONNTE_TOKEN = os.environ.get("FONNTE_TOKEN")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# FUNGSI PENTING: Ubah 08 jadi 62
+# FUNGSI PENTING: Bersihkan nomor dari + dan - dan spasi
 def normalize_phone(phone):
     if not phone: return ""
-    phone = str(phone).strip().replace('-', '').replace(' ', '')
+    # Hapus +, -, dan spasi
+    phone = str(phone).strip().replace('-', '').replace(' ', '').replace('+', '')
+    # Ubah 08 jadi 62
     if phone.startswith('0'):
         return '62' + phone[1:]
     return phone
@@ -32,7 +34,6 @@ def dashboard():
         chats = []
 
     sent_count = sum(1 for c in chats if c.get('direction') == 'outbound')
-    # Hitung Read lebih fleksibel
     read_count = sum(1 for c in chats if c.get('status') and 'read' in c.get('status').lower())
     reply_count = sum(1 for c in chats if c.get('direction') == 'inbound')
             
@@ -46,7 +47,7 @@ def send_message():
     raw_phone = request.form.get('phone')
     message = request.form.get('message')
     
-    # 1. FORMAT NOMOR DULU (Supaya cocok dengan laporan Fonnte nanti)
+    # BERSIHKAN NOMOR SEBELUM DISIMPAN
     phone = normalize_phone(raw_phone)
     
     headers = {'Authorization': FONNTE_TOKEN}
@@ -58,7 +59,6 @@ def send_message():
         pass
     
     try:
-        # Simpan dengan nomor yang sudah diformat (62...)
         supabase.table('chats').insert({
             "customer_phone": phone, 
             "message": message,
@@ -77,7 +77,6 @@ def webhook():
 
     print(f"WEBHOOK RAW: {data}")
 
-    # Ambil nomor dari berbagai kemungkinan field Fonnte
     sender = data.get('sender')
     remote_jid = data.get('remoteJid')
     
@@ -85,9 +84,9 @@ def webhook():
     if sender:
         nomor_masuk = sender
     elif remote_jid:
-        nomor_masuk = remote_jid.split('@')[0] # Ambil angka depan dari 628xx@s.whatsapp.net
+        nomor_masuk = remote_jid.split('@')[0]
         
-    # Pastikan formatnya bersih
+    # Pastikan nomor dari webhook juga dibersihkan
     nomor_masuk = normalize_phone(nomor_masuk)
     
     message = data.get('message')
@@ -95,9 +94,8 @@ def webhook():
 
     # KASUS 1: UPDATE STATUS BACA (READ)
     if status and 'read' in status.lower() and nomor_masuk:
-        print(f"Mencocokkan laporan READ dari: {nomor_masuk}")
+        print(f"Laporan READ dari: {nomor_masuk}")
         try:
-            # Cari pesan TERAKHIR ke nomor (62...) ini
             last_msg = supabase.table('chats').select('id')\
                 .eq('customer_phone', nomor_masuk)\
                 .eq('direction', 'outbound')\
@@ -109,8 +107,6 @@ def webhook():
                 msg_id = last_msg.data[0]['id']
                 supabase.table('chats').update({'status': 'read'}).eq('id', msg_id).execute()
                 print(f"BERHASIL: Pesan ID {msg_id} status jadi READ")
-            else:
-                print("GAGAL: Tidak menemukan pesan outbound untuk nomor ini di DB.")
         except Exception as e:
             print(f"Error DB Update: {e}")
 
