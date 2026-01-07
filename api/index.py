@@ -41,9 +41,8 @@ def dashboard():
         
         if direction == 'outbound':
             sent_count += 1
-            # LOGIKA BARU: Kita hitung 'delivered' (terkirim) sebagai sukses juga
-            # Supaya angkanya tidak nol terus
-            if 'read' in status or '3' in status or 'delivered' in status or '2' in status:
+            # LOGIKA JUJUR: Hanya hitung jika status benar-benar READ
+            if 'read' in status or '3' in status:
                 read_count += 1
         elif direction == 'inbound':
             reply_count += 1
@@ -68,16 +67,12 @@ def send_message():
     try:
         req = requests.post('https://api.fonnte.com/send', headers=headers, data=data)
         res_json = req.json()
-        
-        # Tangkap ID (Support berbagai format response Fonnte)
         if 'id' in res_json and isinstance(res_json['id'], list) and len(res_json['id']) > 0:
             fonnte_id = res_json['id'][0]
         if not fonnte_id and 'data' in res_json and isinstance(res_json['data'], list) and len(res_json['data']) > 0:
              fonnte_id = res_json['data'][0].get('id')
-
-    except Exception as e:
-        print(f"Error Kirim: {e}")
-        status_awal = "failed"
+    except:
+        pass
     
     try:
         supabase.table('chats').insert({
@@ -106,17 +101,16 @@ def webhook():
         # Translate kode angka Fonnte
         final_status = str(raw_status)
         if str(raw_status) == '2': final_status = 'delivered' # Centang 2 Abu
-        if str(raw_status) == '3': final_status = 'read'      # Centang 2 Biru
+        if str(raw_status) == '3': final_status = 'read'      # Centang 2 Biru (INI YANG KITA CARI)
 
-        # KASUS A: UPDATE STATUS (Pakai ID)
+        # UPDATE STATUS
         if msg_id and raw_status:
             print(f"Update Status ID {msg_id} -> {final_status}")
             supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
 
-        # KASUS B: BALASAN (Pakai Sender)
+        # PESAN MASUK
         sender = data.get('sender')
         message = data.get('message')
-        
         if sender and message:
             sender = normalize_phone(sender)
             existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', sender).limit(1).execute()
@@ -129,7 +123,7 @@ def webhook():
                 }).execute()
                 
     except Exception as e:
-        print(f"ERROR WEBHOOK: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
 
     return "OK", 200
