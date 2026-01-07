@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monitoring WA Admin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen p-6">
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-8">Dashboard Admin</h1>
+
+        <div class="grid grid-cols-3 gap-4 mb-8">
+            <div class="bg-white p-6 rounded shadow border-l-4 border-blue-500 text-center">
+                <p class="text-xs font-bold text-gray-500 uppercase">Total Kirim</p>
+                <p class="text-3xl font-bold">{{ stats['sent'] }}</p>
+            </div>
+            <div class="bg-white p-6 rounded shadow border-l-4 border-yellow-500 text-center">
+                <p class="text-xs font-bold text-gray-500 uppercase">Dibaca</p>
+                <p class="text-3xl font-bold text-yellow-600">{{ stats['read'] }}</p>
+            </div>
+            <div class="bg-white p-6 rounded shadow border-l-4 border-green-500 text-center">
+                <p class="text-xs font-bold text-gray-500 uppercase">Dibalas</p>
+                <p class="text-3xl font-bold text-green-600">{{ stats['replied'] }}</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="bg-white p-6 rounded shadow">
+                <h2 class="font-bold text-lg mb-4">Kirim Pesan</h2>
+                <form action="/send" method="POST">
+                    <label class="block text-sm mb-1">Nomor HP</label>
+                    <input type="text" name="phone" class="w-full border p-2 rounded mb-3" required placeholder="08123456789">
+                    <label class="block text-sm mb-1">Pesan</label>
+                    <textarea name="message" rows="3" class="w-full border p-2 rounded mb-3" required></textarea>
+                    <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">Kirim</button>
+                </form>
+            </div>
+
+            <div class="bg-white p-6 rounded shadow">
+                <h2 class="font-bold text-lg mb-4 text-green-700">Pesan Masuk</h2>
+                <div class="overflow-y-auto max-h-64">
+                    <table class="w-full text-sm">
+                        {% for chat in replies %}
+                        <tr class="border-b">
+                            <td class="py-2 font-bold">{{ chat['customer_phone'] }}</td>
+                            <td class="py-2">{{ chat['message'] }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td class="py-4 text-center text-gray-400">Belum ada pesan masuk.</td></tr>
+                        {% endfor %}
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
