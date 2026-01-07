@@ -21,7 +21,8 @@ def dashboard():
         # Ambil data hari ini
         response = supabase.table('chats').select("*").gte('created_at', today).order('created_at', desc=True).execute()
         chats = response.data
-    except:
+    except Exception as e:
+        print(f"Error Dashboard: {e}")
         chats = []
 
     stats = {
@@ -29,7 +30,7 @@ def dashboard():
         'read': sum(1 for c in chats if c.get('status') == 'READ'),
         'replied': sum(1 for c in chats if c.get('direction') == 'inbound')
     }
-
+    
     replies = [c for c in chats if c.get('direction') == 'inbound']
     return render_template('dashboard.html', stats=stats, replies=replies)
 
@@ -37,16 +38,16 @@ def dashboard():
 def send_message():
     phone = request.form.get('phone')
     message = request.form.get('message')
-
-    # Kirim Fonnte
+    
+    # 1. Kirim Lewat Fonnte
     headers = {'Authorization': FONNTE_TOKEN}
     data = {'target': phone, 'message': message}
     try:
         requests.post('https://api.fonnte.com/send', headers=headers, data=data)
-    except:
-        pass
-
-    # Simpan Database
+    except Exception as e:
+        print(f"Error Fonnte: {e}")
+    
+    # 2. Simpan Database
     try:
         supabase.table('chats').insert({
             "customer_phone": phone,
@@ -54,34 +55,45 @@ def send_message():
             "direction": "outbound",
             "status": "sent"
         }).execute()
-    except:
-        pass
-
+    except Exception as e:
+        print(f"Error Simpan DB: {e}")
+    
     return redirect(url_for('dashboard'))
 
-@app.route('/webhook', methods=['POST'])
+@app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
+    # Cek data dari JSON atau Form (Fonnte kadang kirim beda-beda)
     data = request.json
-    if data:
-        sender = data.get('sender')
-        message = data.get('message')
-        status = data.get('status')
+    if not data:
+        data = request.form
+    
+    print(f"WEBHOOK MASUK: {data}") # Ini akan muncul di Logs Vercel
 
-        if status == 'READ':
-            try:
-                last = supabase.table('chats').select('id').eq('customer_phone', sender).eq('direction', 'outbound').order('created_at', desc=True).limit(1).execute()
-                if last.data:
-                    supabase.table('chats').update({'status': 'READ'}).eq('id', last.data[0]['id']).execute()
-            except:
-                pass
-        elif message and not status:
-            try:
-                supabase.table('chats').insert({
-                    "customer_phone": sender,
-                    "message": message,
-                    "direction": "inbound",
-                    "status": "received"
-                }).execute()
-            except:
-                pass
+    if not data:
+        return "No Data", 200
+
+    sender = data.get('sender')
+    message = data.get('message')
+    status = data.get('status')
+    
+    # KASUS: Ada Balasan Pesan (Inbound)
+    if sender and message and not status:
+        try:
+            print(f"Menyimpan pesan dari {sender}...")
+            supabase.table('chats').insert({
+                "customer_phone": sender,
+                "message": message,
+                "direction": "inbound",
+                "status": "received"
+            }).execute()
+            print("Berhasil simpan!")
+        except Exception as e:
+            print(f"GAGAL SIMPAN KE DB: {e}")
+
+    # KASUS: Update Status Baca (READ)
+    # (Catatan: Status READ kadang tidak membawa nomor pengirim, jadi ini best-effort)
+    if status == 'READ':
+        print(f"Status READ diterima untuk ID: {data.get('id')}")
+        # Logika update status bisa ditambahkan nanti jika ID disimpan
+
     return "OK", 200
