@@ -18,20 +18,31 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 def dashboard():
     today = datetime.now().strftime('%Y-%m-%d')
     try:
-        # Ambil data hari ini
         response = supabase.table('chats').select("*").gte('created_at', today).order('created_at', desc=True).execute()
         chats = response.data
     except Exception as e:
         print(f"Error Dashboard: {e}")
         chats = []
 
-    stats = {
-        'sent': sum(1 for c in chats if c.get('direction') == 'outbound'),
-        'read': sum(1 for c in chats if c.get('status') == 'READ'),
-        'replied': sum(1 for c in chats if c.get('direction') == 'inbound')
-    }
+    # Hitung Statistik (Support huruf besar/kecil)
+    sent_count = 0
+    read_count = 0
+    reply_count = 0
     
+    for c in chats:
+        direction = c.get('direction')
+        status = c.get('status', '').lower() # Ubah ke huruf kecil semua biar aman
+        
+        if direction == 'outbound':
+            sent_count += 1
+            if 'read' in status: # Cek jika ada kata 'read'
+                read_count += 1
+        elif direction == 'inbound':
+            reply_count += 1
+            
+    stats = {'sent': sent_count, 'read': read_count, 'replied': reply_count}
     replies = [c for c in chats if c.get('direction') == 'inbound']
+    
     return render_template('dashboard.html', stats=stats, replies=replies)
 
 @app.route('/send', methods=['POST'])
@@ -39,15 +50,13 @@ def send_message():
     phone = request.form.get('phone')
     message = request.form.get('message')
     
-    # 1. Kirim Lewat Fonnte
     headers = {'Authorization': FONNTE_TOKEN}
     data = {'target': phone, 'message': message}
     try:
         requests.post('https://api.fonnte.com/send', headers=headers, data=data)
-    except Exception as e:
-        print(f"Error Fonnte: {e}")
+    except:
+        pass
     
-    # 2. Simpan Database
     try:
         supabase.table('chats').insert({
             "customer_phone": phone,
@@ -55,45 +64,48 @@ def send_message():
             "direction": "outbound",
             "status": "sent"
         }).execute()
-    except Exception as e:
-        print(f"Error Simpan DB: {e}")
+    except:
+        pass
     
     return redirect(url_for('dashboard'))
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
-    # Cek data dari JSON atau Form (Fonnte kadang kirim beda-beda)
-    data = request.json
-    if not data:
-        data = request.form
-    
-    print(f"WEBHOOK MASUK: {data}") # Ini akan muncul di Logs Vercel
+    data = request.json or request.form
+    if not data: return "No Data", 200
 
-    if not data:
-        return "No Data", 200
+    print(f"WEBHOOK MASUK: {data}") # Cek Log Vercel kalau penasaran
 
+    # 1. Ambil Data Penting (Fonnte kadang kirim 'status', kadang 'state')
     sender = data.get('sender')
     message = data.get('message')
-    status = data.get('status')
+    status = data.get('status') or data.get('state') # <- INI KUNCINYA
     
-    # KASUS: Ada Balasan Pesan (Inbound)
-    if sender and message and not status:
-        try:
-            print(f"Menyimpan pesan dari {sender}...")
-            supabase.table('chats').insert({
-                "customer_phone": sender,
-                "message": message,
-                "direction": "inbound",
-                "status": "received"
-            }).execute()
-            print("Berhasil simpan!")
-        except Exception as e:
-            print(f"GAGAL SIMPAN KE DB: {e}")
+    # 2. Logika Update Status (READ/DELIVERED)
+    if status:
+        # Cari pesan terakhir ke nomor ini
+        device_phone = data.get('device') # Nomor HP kita
+        # Kita asumsikan update status untuk pesan terakhir yg kita kirim
+        # (Fitur ini terbatas karena Fonnte versi gratis tidak kirim ID pesan spesifik)
+        if status.lower() == 'read':
+             # Opsional: Update database jika mau (agak tricky tanpa ID)
+             pass 
 
-    # KASUS: Update Status Baca (READ)
-    # (Catatan: Status READ kadang tidak membawa nomor pengirim, jadi ini best-effort)
-    if status == 'READ':
-        print(f"Status READ diterima untuk ID: {data.get('id')}")
-        # Logika update status bisa ditambahkan nanti jika ID disimpan
+    # 3. Logika Pesan Masuk (BALASAN)
+    # Pastikan ini bukan status update (biasanya status update gak ada 'message' user)
+    if sender and message and (not status or status == 'received'):
+        try:
+            # Cek dulu supaya tidak double input
+            existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', sender).limit(1).execute()
+            if not existing.data:
+                supabase.table('chats').insert({
+                    "customer_phone": sender,
+                    "message": message,
+                    "direction": "inbound",
+                    "status": "received"
+                }).execute()
+                print("Balasan tersimpan!")
+        except Exception as e:
+            print(f"Gagal simpan balasan: {e}")
 
     return "OK", 200
