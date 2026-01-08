@@ -69,7 +69,7 @@ def dashboard():
     
     # Set untuk menampung nomor yang membalas
     nomor_yang_balas = set()
-    for c in chats:
+    for c in chats_daily:
         if c.get('direction') == 'inbound':
             reply_count += 1
             if c.get('customer_phone'):
