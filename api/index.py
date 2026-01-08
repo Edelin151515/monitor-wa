@@ -138,36 +138,60 @@ def send_message():
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     try:
-        data = request.json or request.form
-        if not data: return "No Data", 200
+        # Gunakan get_json(silent=True) agar tidak crash jika payload bukan JSON
+        data = request.get_json(silent=True) or request.form or request.args
+        if not data: 
+            return "OK", 200
 
+        # 1. LOGIKA UPDATE STATUS (webhook status)
         msg_id = data.get('stateid') or data.get('id')
         raw_status = data.get('state') or data.get('status')
         
-        final_status = str(raw_status).lower()
-        if final_status == '2': final_status = 'delivered'
-        elif final_status == '3': final_status = 'read'
-        elif final_status == '0': final_status = 'pending'
-        elif final_status == '1': final_status = 'sent'
+        if msg_id and raw_status is not None:
+            final_status = str(raw_status).lower()
+            if final_status == '2': final_status = 'delivered'
+            elif final_status == '3': final_status = 'read'
+            elif final_status == '0': final_status = 'pending'
+            elif final_status == '1': final_status = 'sent'
 
-        if msg_id and raw_status:
-            supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
+            # Update status di database berdasarkan fonnte_id
+            try:
+                # Coba update dengan string ID
+                supabase.table('chats').update({'status': final_status}).eq('fonnte_id', str(msg_id)).execute()
+                # Jika ID mungkin angka
+                if str(msg_id).isdigit():
+                    supabase.table('chats').update({'status': final_status}).eq('fonnte_id', int(msg_id)).execute()
+            except Exception as e:
+                print(f"Error Update Status: {e}")
 
+        # 2. LOGIKA PESAN MASUK (webhook message)
         sender = data.get('sender')
         message = data.get('message')
         
         if sender and message:
             sender = normalize_phone(sender)
-            existing = supabase.table('chats').select('id').eq('message', message).eq('customer_phone', sender).limit(1).execute()
-            if not existing.data:
-                supabase.table('chats').insert({
-                    "customer_phone": sender,
-                    "message": message,
-                    "direction": "inbound",
-                    "status": "received"
-                }).execute()
+            # Cek apakah pesan ini sudah pernah disimpan (hindari duplikat dari webhook)
+            try:
+                existing = supabase.table('chats').select('id')\
+                    .eq('message', message)\
+                    .eq('customer_phone', sender)\
+                    .eq('direction', 'inbound')\
+                    .limit(1).execute()
+                
+                if not existing.data:
+                    supabase.table('chats').insert({
+                        "customer_phone": sender,
+                        "message": message,
+                        "direction": "inbound",
+                        "status": "received"
+                    }).execute()
+            except Exception as e:
+                print(f"Error Save Inbound: {e}")
                 
     except Exception as e:
+        # Cetak error ke log server tapi tetap balas 200 ke Fonnte
+        print(f"Webhook Crash: {e}")
         traceback.print_exc()
 
+    # Selalu balas 200 OK agar Fonnte tidak menganggap gagal dan mengirim ulang terus-menerus
     return "OK", 200
