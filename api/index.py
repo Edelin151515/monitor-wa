@@ -26,22 +26,11 @@ def dashboard():
     selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
     
     try:
+        # 2. Ambil data Statistik (Hari Ini)
         date_obj = datetime.strptime(selected_date_str, '%Y-%m-%d')
-        # Filter statistik harian Tetap (H+0)
         start_stats = f"{selected_date_str}T00:00:00"
         end_stats = f"{selected_date_str}T23:59:59"
         
-        # Filter untuk Leads (Lihat ke belakang 3 hari agar yang baru dibaca hari ini tapi dikirim kemarin tetap muncul)
-        three_days_ago = (date_obj - timedelta(days=3)).strftime('%Y-%m-%d')
-        start_leads = f"{three_days_ago}T00:00:00"
-    except:
-        selected_date_str = datetime.now().strftime('%Y-%m-%d')
-        start_stats = f"{selected_date_str}T00:00:00"
-        end_stats = f"{selected_date_str}T23:59:59"
-        start_leads = f"{(datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')}T00:00:00"
-
-    try:
-        # Ambil data untuk statistik hari ini
         resp_stats = supabase.table('chats').select("*")\
             .gte('created_at', start_stats)\
             .lte('created_at', end_stats)\
@@ -49,25 +38,26 @@ def dashboard():
             .execute()
         chats_daily = resp_stats.data
 
-        # Ambil data yang lebih luas untuk follow-up (agar yang baru dibaca hari ini tetap terdeteksi)
+        # 3. Ambil data Leads (Seluruh data 3 hari terakhir agar sequence chat terbaca utuh)
+        three_days_ago = (date_obj - timedelta(days=3)).strftime('%Y-%m-%d')
+        start_leads = f"{three_days_ago}T00:00:00"
+        
         resp_leads = supabase.table('chats').select("*")\
             .gte('created_at', start_leads)\
             .lte('created_at', end_stats)\
-            .eq('direction', 'outbound')\
             .order('created_at', desc=True)\
             .execute()
-        chats_leads = resp_leads.data
+        chats_all = resp_leads.data
     except Exception as e:
-        print(f"Error Dashboard: {e}")
+        print(f"Error Dashboard Data: {e}")
         chats_daily = []
-        chats_leads = []
+        chats_all = []
 
     # --- LOGIKA POTENSIAL BARU ---
     sent_count = 0
     delivered_count = 0 # Menggantikan "Dibaca" yg error
     reply_count = 0
     
-    # Set untuk menampung nomor yang membalas
     nomor_yang_balas = set()
     for c in chats_daily:
         if c.get('direction') == 'inbound':
@@ -77,33 +67,35 @@ def dashboard():
 
     sent_count = 0
     delivered_count = 0
-    
-    # Proses Statistik Harian
     for c in chats_daily:
         if c.get('direction') == 'outbound':
             sent_count += 1
             status = str(c.get('status')).lower()
             nomor = c.get('customer_phone')
-            
-            # Valid jika sudah sampai (delivered) atau dibaca (read) atau dibalas
-            is_valid = any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas
-            if is_valid:
+            if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas:
                 delivered_count += 1
 
-    # Proses List Follow-Up (Gunakan chats_leads yang cakupannya lebih luas)
+    # --- LOGIKA FOLLOW-UP (SEQUENCE AWARE) ---
+    # Kita cari nomor yang pesan TERAKHIRNYA adalah outbound BERSTATUS READ
     read_leads = []
+    latest_per_phone = {}
+    
+    # chats_all sudah terurut descending (terbaru di atas)
+    for c in chats_all:
+        phone = c.get('customer_phone')
+        if phone and phone not in latest_per_phone:
+            latest_per_phone[phone] = c
 
-    for c in chats_leads:
-        status = str(c.get('status')).lower()
-        nomor = c.get('customer_phone')
-        is_read = 'read' in status or '3' in status
-        
-        # JIKA sudah dibaca DAN belum membalas
-        if is_read and nomor not in nomor_yang_balas:
-            lead_data = {'phone': nomor, 'msg': c.get('message'), 'status': status}
-            # Hindari duplikat nomor dalam satu list
-            if not any(d['phone'] == nomor for d in read_leads):
-                read_leads.append(lead_data)
+    for phone, last_msg in latest_per_phone.items():
+        if last_msg.get('direction') == 'outbound':
+            status = str(last_msg.get('status')).lower()
+            if 'read' in status or '3' in status:
+                read_leads.append({
+                    'phone': phone,
+                    'msg': last_msg.get('message'),
+                    'status': status,
+                    'time': last_msg.get('created_at')
+                })
 
     stats = {
         'sent': sent_count, 
