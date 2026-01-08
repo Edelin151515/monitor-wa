@@ -26,23 +26,23 @@ def dashboard():
     selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
     
     # Hitung batas waktu untuk filter database (Pakai Offset WIB +07:00)
+    # Kita beri buffer 7 jam ke depan karena isu default created_at di DB user
     try:
         date_obj = datetime.strptime(selected_date_str, '%Y-%m-%d')
-        next_day_obj = date_obj + timedelta(days=1)
-        
-        # Format string ISO8601 dengan offset +07:00
-        start_filter = f"{selected_date_str}T00:00:00+07:00"
-        end_filter = f"{next_day_obj.strftime('%Y-%m-%d')}T00:00:00+07:00"
+        # Mulai dari H-1 jam 17:00 UTC (Sama dengan Hari H jam 00:00 WIB)
+        # Tapi karena DB user menyimpan +7 jam "lebih cepat", kita sesuaikan
+        start_filter = f"{selected_date_str}T00:00:00"
+        end_filter = f"{(date_obj + timedelta(days=1)).strftime('%Y-%m-%d')}T23:59:59"
     except:
         selected_date_str = datetime.now().strftime('%Y-%m-%d')
-        start_filter = f"{selected_date_str}T00:00:00+07:00"
-        end_filter = f"{(datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')}T00:00:00+07:00"
+        start_filter = f"{selected_date_str}T00:00:00"
+        end_filter = f"{(datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')}T23:59:59"
 
     try:
-        # Query: Ambil data HANYA pada tanggal yang dipilih (sesuai WIB)
+        # Query: Ambil data (tanpa offset ketat dulu untuk melihat apakah data masuk)
         response = supabase.table('chats').select("*")\
             .gte('created_at', start_filter)\
-            .lt('created_at', end_filter)\
+            .lte('created_at', end_filter)\
             .order('created_at', desc=True)\
             .execute()
         chats = response.data
