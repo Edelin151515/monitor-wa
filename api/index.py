@@ -59,7 +59,8 @@ def dashboard():
                 nomor_yang_balas.add(c.get('customer_phone'))
 
     # List untuk Nasabah Potensial (Sudah terkirim, tapi belum balas)
-    potential_leads = []
+    read_leads = []      # Prioritas: Sudah Baca (Centang Biru) tapi belum balas
+    delivered_leads = [] # Standar: Sudah Sampai (Centang 2) tapi belum baca/balas
 
     for c in chats:
         if c.get('direction') == 'outbound':
@@ -68,28 +69,37 @@ def dashboard():
             nomor = c.get('customer_phone')
             
             # Cek Status Terkirim (Valid)
-            # Kode 2 (Delivered), 3 (Read), atau kata 'delivered'/'read'
-            # ATAU jika nomor tersebut termasuk yang sudah membalas (pasti sudah sampai)
-            is_delivered = 'delivered' in status or 'read' in status or '2' in status or '3' in status or nomor in nomor_yang_balas
+            is_read = 'read' in status or '3' in status
+            is_delivered = 'delivered' in status or '2' in status or is_read or nomor in nomor_yang_balas
             
             if is_delivered:
                 delivered_count += 1
-                # LOGIKA POTENSIAL:
-                # Jika sudah terkirim (valid) DAN nomornya TIDAK ada di daftar pembalas
+                # Jika nomornya TIDAK ada di daftar pembalas
                 if nomor not in nomor_yang_balas:
-                    # Cek supaya tidak double di list
-                    if not any(d['phone'] == nomor for d in potential_leads):
-                         potential_leads.append({'phone': nomor, 'msg': c.get('message'), 'status': status if status != 'sent' else 'delivered'})
+                    # Tentukan masuk kategori mana
+                    lead_data = {'phone': nomor, 'msg': c.get('message'), 'status': status if status != 'sent' else 'delivered'}
+                    
+                    if is_read:
+                        if not any(d['phone'] == nomor for d in read_leads):
+                            read_leads.append(lead_data)
+                    else:
+                        if not any(d['phone'] == nomor for d in delivered_leads):
+                            delivered_leads.append(lead_data)
 
     stats = {
         'sent': sent_count, 
-        'valid': delivered_count, # Valid = Pesan Nyampe (Centang 2)
+        'valid': delivered_count, 
         'replied': reply_count
     }
     
     replies = [c for c in chats if c.get('direction') == 'inbound']
     
-    return render_template('dashboard.html', stats=stats, replies=replies, potential=potential_leads, selected_date=selected_date_str)
+    return render_template('dashboard.html', 
+                          stats=stats, 
+                          replies=replies, 
+                          read_leads=read_leads, 
+                          delivered_leads=delivered_leads, 
+                          selected_date=selected_date_str)
 
 @app.route('/send', methods=['POST'])
 def send_message():
