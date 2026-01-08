@@ -69,7 +69,8 @@ def dashboard():
             
             # Cek Status Terkirim (Valid)
             # Kode 2 (Delivered), 3 (Read), atau kata 'delivered'/'read'
-            is_delivered = 'delivered' in status or 'read' in status or '2' in status or '3' in status
+            # ATAU jika nomor tersebut termasuk yang sudah membalas (pasti sudah sampai)
+            is_delivered = 'delivered' in status or 'read' in status or '2' in status or '3' in status or nomor in nomor_yang_balas
             
             if is_delivered:
                 delivered_count += 1
@@ -78,7 +79,7 @@ def dashboard():
                 if nomor not in nomor_yang_balas:
                     # Cek supaya tidak double di list
                     if not any(d['phone'] == nomor for d in potential_leads):
-                         potential_leads.append({'phone': nomor, 'msg': c.get('message'), 'status': status})
+                         potential_leads.append({'phone': nomor, 'msg': c.get('message'), 'status': status if status != 'sent' else 'delivered'})
 
     stats = {
         'sent': sent_count, 
@@ -134,9 +135,11 @@ def webhook():
         msg_id = data.get('stateid') or data.get('id')
         raw_status = data.get('state') or data.get('status')
         
-        final_status = str(raw_status)
-        if str(raw_status) == '2': final_status = 'delivered'
-        if str(raw_status) == '3': final_status = 'read'
+        final_status = str(raw_status).lower()
+        if final_status == '2': final_status = 'delivered'
+        elif final_status == '3': final_status = 'read'
+        elif final_status == '0': final_status = 'pending'
+        elif final_status == '1': final_status = 'sent'
 
         if msg_id and raw_status:
             supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id).execute()
