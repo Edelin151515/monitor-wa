@@ -25,30 +25,42 @@ def dashboard():
     # 1. AMBIL TANGGAL DARI PILIHAN USER (Default: Hari Ini)
     selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
     
-    # Hitung batas waktu untuk filter database (Pakai Offset WIB +07:00)
-    # Kita beri buffer 7 jam ke depan karena isu default created_at di DB user
     try:
         date_obj = datetime.strptime(selected_date_str, '%Y-%m-%d')
-        # Mulai dari H-1 jam 17:00 UTC (Sama dengan Hari H jam 00:00 WIB)
-        # Tapi karena DB user menyimpan +7 jam "lebih cepat", kita sesuaikan
-        start_filter = f"{selected_date_str}T00:00:00"
-        end_filter = f"{(date_obj + timedelta(days=1)).strftime('%Y-%m-%d')}T23:59:59"
+        # Filter statistik harian Tetap (H+0)
+        start_stats = f"{selected_date_str}T00:00:00"
+        end_stats = f"{selected_date_str}T23:59:59"
+        
+        # Filter untuk Leads (Lihat ke belakang 3 hari agar yang baru dibaca hari ini tapi dikirim kemarin tetap muncul)
+        three_days_ago = (date_obj - timedelta(days=3)).strftime('%Y-%m-%d')
+        start_leads = f"{three_days_ago}T00:00:00"
     except:
         selected_date_str = datetime.now().strftime('%Y-%m-%d')
-        start_filter = f"{selected_date_str}T00:00:00"
-        end_filter = f"{(datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')}T23:59:59"
+        start_stats = f"{selected_date_str}T00:00:00"
+        end_stats = f"{selected_date_str}T23:59:59"
+        start_leads = f"{(datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')}T00:00:00"
 
     try:
-        # Query: Ambil data (tanpa offset ketat dulu untuk melihat apakah data masuk)
-        response = supabase.table('chats').select("*")\
-            .gte('created_at', start_filter)\
-            .lte('created_at', end_filter)\
+        # Ambil data untuk statistik hari ini
+        resp_stats = supabase.table('chats').select("*")\
+            .gte('created_at', start_stats)\
+            .lte('created_at', end_stats)\
             .order('created_at', desc=True)\
             .execute()
-        chats = response.data
+        chats_daily = resp_stats.data
+
+        # Ambil data yang lebih luas untuk follow-up (agar yang baru dibaca hari ini tetap terdeteksi)
+        resp_leads = supabase.table('chats').select("*")\
+            .gte('created_at', start_leads)\
+            .lte('created_at', end_stats)\
+            .eq('direction', 'outbound')\
+            .order('created_at', desc=True)\
+            .execute()
+        chats_leads = resp_leads.data
     except Exception as e:
         print(f"Error Dashboard: {e}")
-        chats = []
+        chats_daily = []
+        chats_leads = []
 
     # --- LOGIKA POTENSIAL BARU ---
     sent_count = 0
@@ -63,28 +75,35 @@ def dashboard():
             if c.get('customer_phone'):
                 nomor_yang_balas.add(c.get('customer_phone'))
 
-    # List untuk Nasabah Potensial (Hanya yang sudah baca, tapi belum balas)
-    read_leads = []
-
-    for c in chats:
+    sent_count = 0
+    delivered_count = 0
+    
+    # Proses Statistik Harian
+    for c in chats_daily:
         if c.get('direction') == 'outbound':
             sent_count += 1
             status = str(c.get('status')).lower()
             nomor = c.get('customer_phone')
             
-            # Cek Status Terkirim (Valid)
-            is_read = 'read' in status or '3' in status
-            # is_delivered: pesan sudah sampai ke HP (Centang 2)
-            is_delivered = 'delivered' in status or '2' in status or is_read or nomor in nomor_yang_balas
-            
-            if is_delivered:
+            # Valid jika sudah sampai (delivered) atau dibaca (read) atau dibalas
+            is_valid = any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas
+            if is_valid:
                 delivered_count += 1
-                
-                # JIKA sudah dibaca DAN belum membalas
-                if is_read and nomor not in nomor_yang_balas:
-                    lead_data = {'phone': nomor, 'msg': c.get('message'), 'status': status}
-                    if not any(d['phone'] == nomor for d in read_leads):
-                        read_leads.append(lead_data)
+
+    # Proses List Follow-Up (Gunakan chats_leads yang cakupannya lebih luas)
+    read_leads = []
+
+    for c in chats_leads:
+        status = str(c.get('status')).lower()
+        nomor = c.get('customer_phone')
+        is_read = 'read' in status or '3' in status
+        
+        # JIKA sudah dibaca DAN belum membalas
+        if is_read and nomor not in nomor_yang_balas:
+            lead_data = {'phone': nomor, 'msg': c.get('message'), 'status': status}
+            # Hindari duplikat nomor dalam satu list
+            if not any(d['phone'] == nomor for d in read_leads):
+                read_leads.append(lead_data)
 
     stats = {
         'sent': sent_count, 
@@ -92,7 +111,7 @@ def dashboard():
         'replied': reply_count
     }
     
-    replies = [c for c in chats if c.get('direction') == 'inbound']
+    replies = [c for c in chats_daily if c.get('direction') == 'inbound']
     
     return render_template('dashboard.html', 
                           stats=stats, 
@@ -116,9 +135,9 @@ def send_message():
         req = requests.post('https://api.fonnte.com/send', headers=headers, data=data)
         res_json = req.json()
         if 'id' in res_json and isinstance(res_json['id'], list) and len(res_json['id']) > 0:
-            fonnte_id = res_json['id'][0]
+            fonnte_id = str(res_json['id'][0]).strip()
         if not fonnte_id and 'data' in res_json and isinstance(res_json['data'], list) and len(res_json['data']) > 0:
-             fonnte_id = res_json['data'][0].get('id')
+             fonnte_id = str(res_json['data'][0].get('id', '')).strip()
     except:
         pass
     
@@ -154,13 +173,24 @@ def webhook():
             elif final_status == '0': final_status = 'pending'
             elif final_status == '1': final_status = 'sent'
 
+            target_phone = data.get('target') # Beberapa webhook status juga mengirim target
+            
             # Update status di database berdasarkan fonnte_id
             try:
-                # Coba update dengan string ID
-                supabase.table('chats').update({'status': final_status}).eq('fonnte_id', str(msg_id)).execute()
-                # Jika ID mungkin angka
-                if str(msg_id).isdigit():
-                    supabase.table('chats').update({'status': final_status}).eq('fonnte_id', int(msg_id)).execute()
+                msg_id_str = str(msg_id).strip()
+                # Cara 1: Update berdasarkan fonnte_id saja
+                query = supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id_str)
+                query.execute()
+                
+                # Cara 2: Jika ada target, pastikan update ke nomor yang benar (tambahan keamanan)
+                if target_phone:
+                    target_normalized = normalize_phone(target_phone)
+                    supabase.table('chats').update({'status': final_status})\
+                        .eq('customer_phone', target_normalized)\
+                        .eq('direction', 'outbound')\
+                        .order('created_at', desc=True)\
+                        .limit(1).execute()
+                        
             except Exception as e:
                 print(f"Error Update Status: {e}")
 
