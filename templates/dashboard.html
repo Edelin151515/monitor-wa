@@ -76,8 +76,7 @@
             </div>
 
             <div class="bg-white p-6 rounded-lg shadow-md overflow-hidden lg:col-span-2 border border-blue-200">
-                <h2 class="text-xl font-bold mb-4 text-blue-600">Prioritas Follow-Up (Sudah Dibaca tapi Belum Balas)
-                </h2>
+                <h2 class="text-xl font-bold mb-4 text-blue-600">Target Follow-Up (Sudah Dibaca tapi Belum Balas)</h2>
                 <p class="text-sm text-gray-500 mb-2">Daftar nomor yang sudah membaca pesan (Centang Biru) namun belum
                     merespon.</p>
                 <div class="overflow-y-auto max-h-64">
@@ -107,44 +106,7 @@
                         </tbody>
                     </table>
                     {% else %}
-                    <p class="text-gray-400 text-center py-4">Tidak ada prioritas follow-up saat ini.</p>
-                    {% endif %}
-                </div>
-            </div>
-
-            <div class="bg-white p-6 rounded-lg shadow-md overflow-hidden lg:col-span-2 border border-yellow-200">
-                <h2 class="text-xl font-bold mb-4 text-yellow-600">Target Follow-Up (Sudah Terkirim tapi Belum
-                    Dibaca/Balas)</h2>
-                <p class="text-sm text-gray-500 mb-2">Daftar nomor yang pesannya sudah masuk (Centang 2) tapi belum
-                    dibuka atau belum ada respon.</p>
-                <div class="overflow-y-auto max-h-64">
-                    {% if delivered_leads %}
-                    <table class="w-full text-left border-collapse">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th class="py-2 px-2">Nomor HP</th>
-                                <th class="py-2 px-2">Pesan Terakhir Kita</th>
-                                <th class="py-2 px-2">Status</th>
-                                <th class="py-2 px-2">Aksi</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for p in delivered_leads %}
-                            <tr class="border-b hover:bg-gray-50">
-                                <td class="py-2 px-2 font-bold">{{ p.phone }}</td>
-                                <td class="py-2 px-2 text-gray-500 truncate max-w-xs">{{ p.msg }}</td>
-                                <td class="py-2 px-2 text-xs uppercase font-bold text-yellow-600">{{ p.status }}</td>
-                                <td class="py-2 px-2">
-                                    <a href="https://wa.me/{{ p.phone }}" target="_blank"
-                                        class="bg-green-500 text-white px-3 py-1 rounded text-xs hover:bg-green-600">Chat
-                                        WA</a>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                    {% else %}
-                    <p class="text-gray-400 text-center py-4">Tidak ada data follow-up hari ini.</p>
+                    <p class="text-gray-400 text-center py-4">Tidak ada data follow-up (yang sudah baca) saat ini.</p>
                     {% endif %}
                 </div>
             </div>

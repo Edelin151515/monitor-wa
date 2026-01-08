@@ -25,19 +25,24 @@ def dashboard():
     # 1. AMBIL TANGGAL DARI PILIHAN USER (Default: Hari Ini)
     selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
     
-    # Hitung batas waktu untuk filter database (Hari H 00:00 s/d Besok 00:00)
+    # Hitung batas waktu untuk filter database (Pakai Offset WIB +07:00)
     try:
         date_obj = datetime.strptime(selected_date_str, '%Y-%m-%d')
-        next_day_str = (date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+        next_day_obj = date_obj + timedelta(days=1)
+        
+        # Format string ISO8601 dengan offset +07:00
+        start_filter = f"{selected_date_str}T00:00:00+07:00"
+        end_filter = f"{next_day_obj.strftime('%Y-%m-%d')}T00:00:00+07:00"
     except:
         selected_date_str = datetime.now().strftime('%Y-%m-%d')
-        next_day_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        start_filter = f"{selected_date_str}T00:00:00+07:00"
+        end_filter = f"{(datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')}T00:00:00+07:00"
 
     try:
-        # Query: Ambil data HANYA pada tanggal yang dipilih
+        # Query: Ambil data HANYA pada tanggal yang dipilih (sesuai WIB)
         response = supabase.table('chats').select("*")\
-            .gte('created_at', selected_date_str)\
-            .lt('created_at', next_day_str)\
+            .gte('created_at', start_filter)\
+            .lt('created_at', end_filter)\
             .order('created_at', desc=True)\
             .execute()
         chats = response.data
@@ -58,9 +63,8 @@ def dashboard():
             if c.get('customer_phone'):
                 nomor_yang_balas.add(c.get('customer_phone'))
 
-    # List untuk Nasabah Potensial (Sudah terkirim, tapi belum balas)
-    read_leads = []      # Prioritas: Sudah Baca (Centang Biru) tapi belum balas
-    delivered_leads = [] # Standar: Sudah Sampai (Centang 2) tapi belum baca/balas
+    # List untuk Nasabah Potensial (Hanya yang sudah baca, tapi belum balas)
+    read_leads = []
 
     for c in chats:
         if c.get('direction') == 'outbound':
@@ -70,21 +74,17 @@ def dashboard():
             
             # Cek Status Terkirim (Valid)
             is_read = 'read' in status or '3' in status
+            # is_delivered: pesan sudah sampai ke HP (Centang 2)
             is_delivered = 'delivered' in status or '2' in status or is_read or nomor in nomor_yang_balas
             
             if is_delivered:
                 delivered_count += 1
-                # Jika nomornya TIDAK ada di daftar pembalas
-                if nomor not in nomor_yang_balas:
-                    # Tentukan masuk kategori mana
-                    lead_data = {'phone': nomor, 'msg': c.get('message'), 'status': status if status != 'sent' else 'delivered'}
-                    
-                    if is_read:
-                        if not any(d['phone'] == nomor for d in read_leads):
-                            read_leads.append(lead_data)
-                    else:
-                        if not any(d['phone'] == nomor for d in delivered_leads):
-                            delivered_leads.append(lead_data)
+                
+                # JIKA sudah dibaca DAN belum membalas
+                if is_read and nomor not in nomor_yang_balas:
+                    lead_data = {'phone': nomor, 'msg': c.get('message'), 'status': status}
+                    if not any(d['phone'] == nomor for d in read_leads):
+                        read_leads.append(lead_data)
 
     stats = {
         'sent': sent_count, 
@@ -98,7 +98,6 @@ def dashboard():
                           stats=stats, 
                           replies=replies, 
                           read_leads=read_leads, 
-                          delivered_leads=delivered_leads, 
                           selected_date=selected_date_str)
 
 @app.route('/send', methods=['POST'])
