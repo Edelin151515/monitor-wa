@@ -92,13 +92,14 @@ def dashboard():
             created_at = last_msg.get('created_at', '') # Contoh: 2026-01-09T08:00:00
             msg_date = created_at.split('T')[0] if 'T' in created_at else created_at
             
-            # SYARAT 1: Status OK (Sent/Delivered/Read)
-            is_status_ok = any(s in status for s in ['read', '3', 'delivered', '2', 'sent', '1'])
+            # SYARAT 1: Status harus READ (sudah dibaca) - bukan sent/delivered
+            # Ini yang membedakan dengan kotak "Terkirim"
+            is_read = 'read' in status or '3' in status
             
             # SYARAT 2: Tanggal pesan terakhir HARUS SAMA dengan tanggal filter
             is_date_match = (msg_date == selected_date_str)
 
-            if is_status_ok and is_date_match:
+            if is_read and is_date_match:
                 read_leads.append({
                     'phone': phone,
                     'msg': last_msg.get('message'),
