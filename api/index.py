@@ -214,4 +214,25 @@ def webhook():
         
         if sender and message:
             sender = normalize_phone(sender)
-            try
+            try: # <--- INI YANG TADI ERROR (KURANG TITIK DUA)
+                existing = supabase.table('chats').select('id')\
+                    .eq('message', message)\
+                    .eq('customer_phone', sender)\
+                    .eq('direction', 'inbound')\
+                    .limit(1).execute()
+                
+                if not existing.data:
+                    supabase.table('chats').insert({
+                        "customer_phone": sender,
+                        "message": message,
+                        "direction": "inbound",
+                        "status": "received"
+                    }).execute()
+            except Exception as e:
+                print(f"Error Save Inbound: {e}")
+                
+    except Exception as e:
+        print(f"Webhook Error: {e}")
+        traceback.print_exc()
+
+    return "OK", 200
