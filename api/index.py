@@ -2,22 +2,20 @@ from flask import Flask, request, render_template, redirect, url_for
 from supabase import create_client, Client
 import requests
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 
 app = Flask(__name__, template_folder='../templates')
 
-# Konfigurasi ENV
+# Konfigurasi Environment Variable
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 FONNTE_TOKEN = os.environ.get("FONNTE_TOKEN")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Normalize nomor HP Indonesia
 def normalize_phone(phone):
-    if not phone:
-        return ""
+    if not phone: return ""
     phone = str(phone).strip().replace('-', '').replace(' ', '').replace('+', '')
     if phone.startswith('0'):
         return '62' + phone[1:]
@@ -25,195 +23,203 @@ def normalize_phone(phone):
 
 @app.route('/')
 def dashboard():
-    selected_date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
-    start = f"{selected_date}T00:00:00"
-    end = f"{selected_date}T23:59:59"
-
+    # 1. AMBIL TANGGAL DARI PILIHAN USER (Default: Hari Ini)
+    selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+    
     try:
-        # Ambil chat sesuai tanggal filter
-        res = supabase.table('chats').select("*")\
-            .gte('created_at', start)\
-            .lte('created_at', end)\
+        # --- QUERY A: Data Statistik (Hanya Hari Ini / Tanggal Terpilih) ---
+        start_stats = f"{selected_date_str}T00:00:00"
+        end_stats = f"{selected_date_str}T23:59:59"
+        
+        resp_stats = supabase.table('chats').select("*")\
+            .gte('created_at', start_stats)\
+            .lte('created_at', end_stats)\
             .order('created_at', desc=True)\
             .execute()
-        chats = res.data
+        chats_daily = resp_stats.data
 
-        # Ambil history panjang untuk cek status terakhir per nomor
-        hist = supabase.table('chats').select("*")\
+        # --- QUERY B: Data History (Untuk Cek Status Terakhir) ---
+        # Kita tetap butuh history agak panjang untuk memastikan dia beneran belum balas (walau beda hari)
+        # Tapi nanti tampilannya akan kita filter sesuai tanggal yang dipilih.
+        resp_leads = supabase.table('chats').select("*")\
             .order('created_at', desc=True)\
             .limit(2000)\
-            .execute()
-        chats_history = hist.data
+            .execute() 
+        
+        chats_all_history = resp_leads.data
 
     except Exception as e:
-        print("Dashboard error:", e)
-        chats = []
-        chats_history = []
+        print(f"Error Dashboard Data: {e}")
+        chats_daily = []
+        chats_all_history = []
 
-    # --- METRIK ---
-    total_kirim = 0
-    terkirim = 0
-    dibalas_nomor = set()
-    followup = {}
-    latest_outbound = {}
+    # --- HITUNG STATISTIK (Harian) ---
+    sent_count = 0
+    delivered_count = 0 
+    reply_count = 0
+    
+    nomor_yang_balas_hari_ini = set()
+    for c in chats_daily:
+        if c.get('direction') == 'inbound':
+            reply_count += 1
+            if c.get('customer_phone'):
+                nomor_yang_balas_hari_ini.add(c.get('customer_phone'))
 
-    # Hitung metrik harian
-    for c in chats:
+    for c in chats_daily:
+        if c.get('direction') == 'outbound':
+            sent_count += 1
+            status = str(c.get('status')).lower()
+            nomor = c.get('customer_phone')
+            if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas_hari_ini:
+                delivered_count += 1
+
+    # --- LOGIKA TARGET FOLLOW-UP (FILTER BY DATE) ---
+    read_leads = []
+    latest_per_phone = {}
+    
+    # 1. Cari pesan terakhir per nomor (dari seluruh history)
+    for c in chats_all_history:
         phone = c.get('customer_phone')
-        direction = c.get('direction')
-        status = str(c.get('status')).lower()
+        if phone and phone not in latest_per_phone:
+            latest_per_phone[phone] = c
 
-        if phone and direction == 'outbound' and phone not in latest_outbound:
-            latest_outbound[phone] = c
+    # 2. Filter: Status belum balas DAN Tanggal chat terakhir == Tanggal yang dipilih
+    for phone, last_msg in latest_per_phone.items():
+        if last_msg.get('direction') == 'outbound':
+            status = str(last_msg.get('status')).lower()
+            
+            # Ambil tanggal pesan terakhir (format YYYY-MM-DD dari timestamp ISO)
+            created_at = last_msg.get('created_at', '') # Contoh: 2026-01-09T08:00:00
+            msg_date = created_at.split('T')[0] if 'T' in created_at else created_at
+            
+            # SYARAT 1: Status OK (Sent/Delivered/Read)
+            is_status_ok = any(s in status for s in ['read', '3', 'delivered', '2', 'sent', '1'])
+            
+            # SYARAT 2: Tanggal pesan terakhir HARUS SAMA dengan tanggal filter
+            is_date_match = (msg_date == selected_date_str)
 
-        if direction == 'inbound' and phone:
-            dibalas_nomor.add(phone)
-
-        # Total Kirim hanya jika sudah dapat event (exclude pending)
-        if direction == 'outbound' and status in ['sent', 'delivered', 'read', '1', '2', '3']:
-            total_kirim += 1
-
-        # Terkirim hanya delivered + read
-        if direction == 'outbound' and status in ['delivered', 'read', '2', '3']:
-            terkirim += 1
-
-    # Cari outbound terakhir per nomor dari history
-    for c in chats_history:
-        phone = c.get('customer_phone')
-        if phone and c.get('direction') == 'outbound' and phone not in latest_outbound:
-            latest_outbound[phone] = c
-
-    # Siapkan follow-up dari outbound terakhir
-    for phone, last in latest_outbound.items():
-        st = str(last.get('status')).lower()
-        if st in ['delivered', 'read', '2', '3']:
-            followup[phone] = {
-                'phone': phone,
-                'msg': last.get('message'),
-                'time': last.get('created_at'),
-                'status': st
-            }
-
-    # Hapus nomor dari follow-up jika sudah balas setelah outbound terakhir
-    for c in chats_history:
-        phone = c.get('customer_phone')
-        if phone in followup and c.get('direction') == 'inbound':
-            if c.get('created_at') > followup[phone]['time']:
-                del followup[phone]
+            if is_status_ok and is_date_match:
+                read_leads.append({
+                    'phone': phone,
+                    'msg': last_msg.get('message'),
+                    'status': status,
+                    'time': last_msg.get('created_at')
+                })
 
     stats = {
-        'total_kirim': total_kirim,
-        'terkirim': terkirim,
-        'dibalas': list(dibalas_nomor),
-        'followup': list(followup.values())
+        'sent': sent_count, 
+        'valid': delivered_count, 
+        'replied': reply_count
     }
-
-    return render_template('dashboard.html',
-                           stats=stats,
-                           selected_date=selected_date)
+    
+    replies = [c for c in chats_daily if c.get('direction') == 'inbound']
+    
+    return render_template('dashboard.html', 
+                           stats=stats, 
+                           replies=replies, 
+                           read_leads=read_leads, 
+                           selected_date=selected_date_str)
 
 @app.route('/send', methods=['POST'])
 def send_message():
     raw_phone = request.form.get('phone')
     message = request.form.get('message')
     phone = normalize_phone(raw_phone)
-
-    # Jangan set langsung "sent", tunggu webhook
-    status_awal = "pending"
-
+    
     headers = {'Authorization': FONNTE_TOKEN}
     data = {'target': phone, 'message': message}
-
+    
     fonnte_id = None
-
+    status_awal = "sent"
+    
     try:
         req = requests.post('https://api.fonnte.com/send', headers=headers, data=data)
         res_json = req.json()
         if 'id' in res_json and isinstance(res_json['id'], list) and len(res_json['id']) > 0:
             fonnte_id = str(res_json['id'][0]).strip()
+        if not fonnte_id and 'data' in res_json and isinstance(res_json['data'], list) and len(res_json['data']) > 0:
+             fonnte_id = str(res_json['data'][0].get('id', '')).strip()
     except:
         pass
-
+    
     try:
         supabase.table('chats').insert({
-            "customer_phone": phone,
+            "customer_phone": phone, 
             "message": message,
             "direction": "outbound",
             "status": status_awal,
             "fonnte_id": fonnte_id
         }).execute()
     except Exception as e:
-        print("DB Save error:", e)
-
+        print(f"Error Simpan DB: {e}")
+    
     return redirect(url_for('dashboard'))
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     try:
         data = request.get_json(silent=True) or request.form or request.args
-        if not data:
+        if not data: 
             return "OK", 200
 
         msg_id = data.get('stateid') or data.get('id')
         raw_status = data.get('state') or data.get('status')
         target_phone = data.get('target')
 
-        final_status = str(raw_status).lower() if raw_status else None
-        if final_status == '2': final_status = 'delivered'
-        elif final_status == '3': final_status = 'read'
-        elif final_status == '1': final_status = 'sent'
-        elif final_status == '0': final_status = 'pending'
+        if raw_status is not None:
+            final_status = str(raw_status).lower()
+            if final_status == '2': final_status = 'delivered'
+            elif final_status == '3': final_status = 'read'
+            elif final_status == '0': final_status = 'pending'
+            elif final_status == '1': final_status = 'sent'
 
-        updated = False
+            updated = False
+            
+            if msg_id:
+                try:
+                    msg_id_str = str(msg_id).strip()
+                    res = supabase.table('chats').update({'status': final_status})\
+                        .eq('fonnte_id', msg_id_str).execute()
+                    if res.data and len(res.data) > 0:
+                        updated = True
+                except Exception as e:
+                    print(f"Update ID Error: {e}")
 
-        # Update berdasarkan fonnte_id dulu
-        if msg_id:
-            try:
-                res = supabase.table('chats').update({'status': final_status})\
-                    .eq('fonnte_id', str(msg_id).strip()).execute()
-                if res.data:
-                    updated = True
-            except:
-                pass
+            if not updated and target_phone:
+                try:
+                    target_normalized = normalize_phone(target_phone)
+                    supabase.table('chats').update({'status': final_status})\
+                        .eq('customer_phone', target_normalized)\
+                        .eq('direction', 'outbound')\
+                        .order('created_at', desc=True)\
+                        .limit(1).execute()
+                except Exception as e:
+                    print(f"Update Fallback Error: {e}")
 
-        # Fallback update berdasarkan nomor outbound terakhir
-        if not updated and target_phone:
-            try:
-                supabase.table('chats').update({'status': final_status})\
-                    .eq('customer_phone', normalize_phone(target_phone))\
-                    .eq('direction', 'outbound')\
-                    .order('created_at', desc=True)\
-                    .limit(1).execute()
-            except:
-                pass
-
-        # Simpan inbound message (balasan nasabah)
-        sender = normalize_phone(data.get('sender'))
+        sender = data.get('sender')
         message = data.get('message')
-
+        
         if sender and message:
+            sender = normalize_phone(sender)
             try:
-                exist = supabase.table('chats').select("id")\
-                    .eq("customer_phone", sender)\
-                    .eq("message", message)\
-                    .eq("direction", "inbound")\
+                existing = supabase.table('chats').select('id')\
+                    .eq('message', message)\
+                    .eq('customer_phone', sender)\
+                    .eq('direction', 'inbound')\
                     .limit(1).execute()
-
-                if not exist.data:
+                
+                if not existing.data:
                     supabase.table('chats').insert({
                         "customer_phone": sender,
                         "message": message,
                         "direction": "inbound",
                         "status": "received"
                     }).execute()
-            except:
-                pass
-
+            except Exception as e:
+                print(f"Error Save Inbound: {e}")
+                
     except Exception as e:
-        print("Webhook error:", e)
+        print(f"Webhook Error: {e}")
         traceback.print_exc()
 
     return "OK", 200
-
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
