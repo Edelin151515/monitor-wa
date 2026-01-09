@@ -27,7 +27,7 @@ def dashboard():
     selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
     
     try:
-        # --- QUERY A: Data Statistik (Hanya Hari Ini / Tanggal Terpilih) ---
+        # --- QUERY A: Statistik (Harian) ---
         start_stats = f"{selected_date_str}T00:00:00"
         end_stats = f"{selected_date_str}T23:59:59"
         
@@ -38,14 +38,14 @@ def dashboard():
             .execute()
         chats_daily = resp_stats.data
 
-        # --- QUERY B: Data History (Untuk Follow Up) ---
+        # --- QUERY B: Follow Up (History Global) ---
         resp_leads = supabase.table('chats').select("*")\
             .order('created_at', desc=True)\
             .limit(2000)\
             .execute() 
         chats_all_history = resp_leads.data
 
-        # --- QUERY C: Pesan Masuk (Realtime/Global) ---
+        # --- QUERY C: Pesan Masuk (Realtime/Global 20 Terakhir) ---
         resp_inbound = supabase.table('chats').select("*")\
             .eq('direction', 'inbound')\
             .order('created_at', desc=True)\
@@ -59,37 +59,41 @@ def dashboard():
         chats_all_history = []
         latest_replies = []
 
-    # --- HITUNG STATISTIK (Hanya untuk tanggal yang dipilih) ---
-    sent_count = 0      # Total Kirim
-    delivered_count = 0 # Terkirim (Valid)
-    reply_count = 0     # Dibalas
+    # --- HITUNG STATISTIK ---
+    sent_count = 0
+    delivered_count = 0 
+    reply_count = 0
     
-    # Hitung dulu siapa saja yang membalas hari ini (untuk validasi silang)
+    # Cek nomor yang sudah balas hari ini
     nomor_yang_balas_hari_ini = set()
     for c in chats_daily:
         if c.get('direction') == 'inbound':
-            reply_count += 1 # ✅ Dibalas = Hitung pesan masuk
+            reply_count += 1
             if c.get('customer_phone'):
                 nomor_yang_balas_hari_ini.add(c.get('customer_phone'))
 
+    # Hitung Statistik Pesan Keluar
     for c in chats_daily:
         if c.get('direction') == 'outbound':
-            sent_count += 1 # ✅ Total Kirim = Semua pesan keluar
+            sent_count += 1 # Total Kirim = Semua pesan keluar (termasuk pending/sent)
             
             status = str(c.get('status')).lower()
             nomor = c.get('customer_phone')
             
-            # ✅ Terkirim = Delivered (2) + Read (3). 
-            # EXCLUDE: Sent (1) / Pending (0)
-            # Logika tambahan: Jika orangnya sudah balas, otomatis dianggap valid/terkirim
-            if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas_hari_ini:
+            # LOGIKA TERKIRIM (VALID):
+            # Hanya Delivered (2) dan Read (3). 
+            # Sent (1) DI-EXCLUDE (tidak dihitung).
+            is_valid_status = any(s in status for s in ['delivered', '2', 'read', '3'])
+            
+            # Atau jika orangnya sudah membalas, otomatis kita anggap valid
+            if is_valid_status or nomor in nomor_yang_balas_hari_ini:
                 delivered_count += 1
 
-    # --- LOGIKA TARGET FOLLOW-UP (FILTER BY DATE) ---
+    # --- LOGIKA TARGET FOLLOW-UP ---
     read_leads = []
     latest_per_phone = {}
     
-    # Ambil chat terakhir per nomor
+    # Ambil chat terakhir per nomor dari history
     for c in chats_all_history:
         phone = c.get('customer_phone')
         if phone and phone not in latest_per_phone:
@@ -102,12 +106,11 @@ def dashboard():
             created_at = last_msg.get('created_at', '') 
             msg_date = created_at.split('T')[0] if 'T' in created_at else created_at
             
-            # ✅ Follow-Up Logic:
-            # 1. Status HARUS 'read' (3) ATAU 'delivered' (2).
-            # 2. Status 'sent' (1) DIBUANG dari list ini (karena wa mungkin offline).
+            # LOGIKA FOLLOW UP:
+            # 1. Status harus READ atau DELIVERED. (Sent/Centang 1 tidak masuk sini)
             is_status_ok = any(s in status for s in ['read', '3', 'delivered', '2'])
             
-            # 3. Tanggal chat terakhir harus sama dengan filter tanggal dashboard
+            # 2. Tanggal chat terakhir harus SAMA dengan tanggal filter dashboard
             is_date_match = (msg_date == selected_date_str)
 
             if is_status_ok and is_date_match:
@@ -214,7 +217,7 @@ def webhook():
         
         if sender and message:
             sender = normalize_phone(sender)
-            try: # <--- INI YANG TADI ERROR (KURANG TITIK DUA)
+            try:
                 existing = supabase.table('chats').select('id')\
                     .eq('message', message)\
                     .eq('customer_phone', sender)\
