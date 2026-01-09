@@ -7,6 +7,7 @@ import traceback
 
 app = Flask(__name__, template_folder='../templates')
 
+# Konfigurasi Environment Variable
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 FONNTE_TOKEN = os.environ.get("FONNTE_TOKEN")
@@ -26,8 +27,7 @@ def dashboard():
     selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
     
     try:
-        # 2. Ambil data Statistik (Hari Ini)
-        date_obj = datetime.strptime(selected_date_str, '%Y-%m-%d')
+        # --- QUERY A: Data Statistik (Hanya Hari Ini / Tanggal Terpilih) ---
         start_stats = f"{selected_date_str}T00:00:00"
         end_stats = f"{selected_date_str}T23:59:59"
         
@@ -38,57 +38,56 @@ def dashboard():
             .execute()
         chats_daily = resp_stats.data
 
-        # 3. Ambil data Leads (Seluruh data 3 hari terakhir agar sequence chat terbaca utuh)
-        three_days_ago = (date_obj - timedelta(days=3)).strftime('%Y-%m-%d')
-        start_leads = f"{three_days_ago}T00:00:00"
-        
+        # --- QUERY B: Data Follow Up (REALTIME / ALL TIME) ---
+        # Mengambil 2000 pesan terakhir tanpa batasan tanggal
+        # Agar yang chat minggu lalu tapi belum balas tetap muncul
         resp_leads = supabase.table('chats').select("*")\
-            .gte('created_at', start_leads)\
-            .lte('created_at', end_stats)\
             .order('created_at', desc=True)\
-            .execute()
-        chats_all = resp_leads.data
+            .limit(2000)\
+            .execute() 
+        
+        chats_all_history = resp_leads.data
+
     except Exception as e:
         print(f"Error Dashboard Data: {e}")
         chats_daily = []
-        chats_all = []
+        chats_all_history = []
 
-    # --- LOGIKA POTENSIAL BARU ---
+    # --- HITUNG STATISTIK (Harian) ---
     sent_count = 0
-    delivered_count = 0 # Menggantikan "Dibaca" yg error
+    delivered_count = 0 
     reply_count = 0
     
-    nomor_yang_balas = set()
+    nomor_yang_balas_hari_ini = set()
     for c in chats_daily:
         if c.get('direction') == 'inbound':
             reply_count += 1
             if c.get('customer_phone'):
-                nomor_yang_balas.add(c.get('customer_phone'))
+                nomor_yang_balas_hari_ini.add(c.get('customer_phone'))
 
-    sent_count = 0
-    delivered_count = 0
     for c in chats_daily:
         if c.get('direction') == 'outbound':
             sent_count += 1
             status = str(c.get('status')).lower()
             nomor = c.get('customer_phone')
-            if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas:
+            if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas_hari_ini:
                 delivered_count += 1
 
-    # --- LOGIKA FOLLOW-UP (SEQUENCE AWARE) ---
-    # Kita cari nomor yang pesan TERAKHIRNYA adalah outbound BERSTATUS READ
+    # --- LOGIKA TARGET FOLLOW-UP (Berdasarkan History Lengkap) ---
     read_leads = []
     latest_per_phone = {}
     
-    # chats_all sudah terurut descending (terbaru di atas)
-    for c in chats_all:
+    # Ambil chat terakhir per nomor
+    for c in chats_all_history:
         phone = c.get('customer_phone')
         if phone and phone not in latest_per_phone:
             latest_per_phone[phone] = c
 
+    # Filter siapa yang harus di follow-up
     for phone, last_msg in latest_per_phone.items():
         if last_msg.get('direction') == 'outbound':
             status = str(last_msg.get('status')).lower()
+            # Masukkan jika status Read/3 (Sudah dibaca tapi pesan terakhir masih dari kita)
             if 'read' in status or '3' in status:
                 read_leads.append({
                     'phone': phone,
@@ -106,10 +105,10 @@ def dashboard():
     replies = [c for c in chats_daily if c.get('direction') == 'inbound']
     
     return render_template('dashboard.html', 
-                          stats=stats, 
-                          replies=replies, 
-                          read_leads=read_leads, 
-                          selected_date=selected_date_str)
+                           stats=stats, 
+                           replies=replies, 
+                           read_leads=read_leads, 
+                           selected_date=selected_date_str)
 
 @app.route('/send', methods=['POST'])
 def send_message():
@@ -149,50 +148,53 @@ def send_message():
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     try:
-        # Gunakan get_json(silent=True) agar tidak crash jika payload bukan JSON
         data = request.get_json(silent=True) or request.form or request.args
         if not data: 
             return "OK", 200
 
-        # 1. LOGIKA UPDATE STATUS (webhook status)
+        # --- LOGIKA UPDATE STATUS (Fix untuk Read) ---
         msg_id = data.get('stateid') or data.get('id')
         raw_status = data.get('state') or data.get('status')
-        
-        if msg_id and raw_status is not None:
+        target_phone = data.get('target')
+
+        if raw_status is not None:
             final_status = str(raw_status).lower()
             if final_status == '2': final_status = 'delivered'
             elif final_status == '3': final_status = 'read'
             elif final_status == '0': final_status = 'pending'
             elif final_status == '1': final_status = 'sent'
 
-            target_phone = data.get('target') # Beberapa webhook status juga mengirim target
+            updated = False
             
-            # Update status di database berdasarkan fonnte_id
-            try:
-                msg_id_str = str(msg_id).strip()
-                # Cara 1: Update berdasarkan fonnte_id saja
-                query = supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id_str)
-                query.execute()
-                
-                # Cara 2: Jika ada target, pastikan update ke nomor yang benar (tambahan keamanan)
-                if target_phone:
+            # 1. Update by ID
+            if msg_id:
+                try:
+                    msg_id_str = str(msg_id).strip()
+                    res = supabase.table('chats').update({'status': final_status})\
+                        .eq('fonnte_id', msg_id_str).execute()
+                    if res.data and len(res.data) > 0:
+                        updated = True
+                except Exception as e:
+                    print(f"Update ID Error: {e}")
+
+            # 2. Update Fallback (Jika ID gagal)
+            if not updated and target_phone:
+                try:
                     target_normalized = normalize_phone(target_phone)
                     supabase.table('chats').update({'status': final_status})\
                         .eq('customer_phone', target_normalized)\
                         .eq('direction', 'outbound')\
                         .order('created_at', desc=True)\
                         .limit(1).execute()
-                        
-            except Exception as e:
-                print(f"Error Update Status: {e}")
+                except Exception as e:
+                    print(f"Update Fallback Error: {e}")
 
-        # 2. LOGIKA PESAN MASUK (webhook message)
+        # --- LOGIKA PESAN MASUK ---
         sender = data.get('sender')
         message = data.get('message')
         
         if sender and message:
             sender = normalize_phone(sender)
-            # Cek apakah pesan ini sudah pernah disimpan (hindari duplikat dari webhook)
             try:
                 existing = supabase.table('chats').select('id')\
                     .eq('message', message)\
@@ -211,9 +213,7 @@ def webhook():
                 print(f"Error Save Inbound: {e}")
                 
     except Exception as e:
-        # Cetak error ke log server tapi tetap balas 200 ke Fonnte
-        print(f"Webhook Crash: {e}")
+        print(f"Webhook Error: {e}")
         traceback.print_exc()
 
-    # Selalu balas 200 OK agar Fonnte tidak menganggap gagal dan mengirim ulang terus-menerus
     return "OK", 200
