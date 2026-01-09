@@ -126,12 +126,30 @@ def send_message():
     try:
         req = requests.post('https://api.fonnte.com/send', headers=headers, data=data)
         res_json = req.json()
-        if 'id' in res_json and isinstance(res_json['id'], list) and len(res_json['id']) > 0:
-            fonnte_id = str(res_json['id'][0]).strip()
-        if not fonnte_id and 'data' in res_json and isinstance(res_json['data'], list) and len(res_json['data']) > 0:
-             fonnte_id = str(res_json['data'][0].get('id', '')).strip()
-    except:
-        pass
+        print(f"[DEBUG] Fonnte Response: {res_json}")  # Debug log
+        
+        # Coba ambil ID dari berbagai format response Fonnte
+        if 'id' in res_json:
+            if isinstance(res_json['id'], list) and len(res_json['id']) > 0:
+                fonnte_id = str(res_json['id'][0]).strip()
+            elif isinstance(res_json['id'], (str, int)):
+                fonnte_id = str(res_json['id']).strip()
+        
+        if not fonnte_id and 'data' in res_json:
+            if isinstance(res_json['data'], list) and len(res_json['data']) > 0:
+                fonnte_id = str(res_json['data'][0].get('id', '')).strip()
+            elif isinstance(res_json['data'], dict):
+                fonnte_id = str(res_json['data'].get('id', '')).strip()
+        
+        # Fallback: cek di detail jika ada
+        if not fonnte_id and 'detail' in res_json:
+            if isinstance(res_json['detail'], list) and len(res_json['detail']) > 0:
+                fonnte_id = str(res_json['detail'][0].get('id', '')).strip()
+        
+        print(f"[DEBUG] Extracted fonnte_id: {fonnte_id}")  # Debug log
+        
+    except Exception as e:
+        print(f"[ERROR] Fonnte API Error: {e}")
     
     try:
         supabase.table('chats').insert({
@@ -141,8 +159,9 @@ def send_message():
             "status": status_awal,
             "fonnte_id": fonnte_id
         }).execute()
+        print(f"[DEBUG] Saved to DB - Phone: {phone}, fonnte_id: {fonnte_id}")
     except Exception as e:
-        print(f"Error Simpan DB: {e}")
+        print(f"[ERROR] Simpan DB: {e}")
     
     return redirect(url_for('dashboard'))
 
@@ -151,40 +170,54 @@ def webhook():
     try:
         # Gunakan get_json(silent=True) agar tidak crash jika payload bukan JSON
         data = request.get_json(silent=True) or request.form or request.args
+        print(f"[WEBHOOK] Raw data received: {data}")  # Debug log
+        
         if not data: 
             return "OK", 200
 
         # 1. LOGIKA UPDATE STATUS (webhook status)
         msg_id = data.get('stateid') or data.get('id')
         raw_status = data.get('state') or data.get('status')
+        target_phone = data.get('target')
         
-        if msg_id and raw_status is not None:
-            final_status = str(raw_status).lower()
+        print(f"[WEBHOOK] msg_id: {msg_id}, raw_status: {raw_status}, target: {target_phone}")
+        
+        if msg_id or (raw_status is not None and target_phone):
+            final_status = str(raw_status).lower() if raw_status else 'unknown'
             if final_status == '2': final_status = 'delivered'
             elif final_status == '3': final_status = 'read'
             elif final_status == '0': final_status = 'pending'
             elif final_status == '1': final_status = 'sent'
-
-            target_phone = data.get('target') # Beberapa webhook status juga mengirim target
             
-            # Update status di database berdasarkan fonnte_id
-            try:
-                msg_id_str = str(msg_id).strip()
-                # Cara 1: Update berdasarkan fonnte_id saja
-                query = supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id_str)
-                query.execute()
-                
-                # Cara 2: Jika ada target, pastikan update ke nomor yang benar (tambahan keamanan)
-                if target_phone:
+            print(f"[WEBHOOK] Final status to update: {final_status}")
+            
+            updated = False
+            
+            # Cara 1: Update berdasarkan fonnte_id
+            if msg_id:
+                try:
+                    msg_id_str = str(msg_id).strip()
+                    result = supabase.table('chats').update({'status': final_status}).eq('fonnte_id', msg_id_str).execute()
+                    if result.data and len(result.data) > 0:
+                        updated = True
+                        print(f"[WEBHOOK] Updated via fonnte_id: {msg_id_str} -> {final_status}")
+                except Exception as e:
+                    print(f"[WEBHOOK ERROR] Update by fonnte_id failed: {e}")
+            
+            # Cara 2: Fallback - update berdasarkan nomor telepon (jika fonnte_id gagal)
+            if not updated and target_phone:
+                try:
                     target_normalized = normalize_phone(target_phone)
-                    supabase.table('chats').update({'status': final_status})\
+                    # Cari pesan outbound terbaru dengan status 'sent' untuk nomor ini
+                    result = supabase.table('chats').update({'status': final_status})\
                         .eq('customer_phone', target_normalized)\
                         .eq('direction', 'outbound')\
-                        .order('created_at', desc=True)\
-                        .limit(1).execute()
-                        
-            except Exception as e:
-                print(f"Error Update Status: {e}")
+                        .eq('status', 'sent')\
+                        .execute()
+                    if result.data and len(result.data) > 0:
+                        print(f"[WEBHOOK] Updated via phone fallback: {target_normalized} -> {final_status}")
+                except Exception as e:
+                    print(f"[WEBHOOK ERROR] Update by phone fallback failed: {e}")
 
         # 2. LOGIKA PESAN MASUK (webhook message)
         sender = data.get('sender')
