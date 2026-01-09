@@ -27,7 +27,8 @@ def dashboard():
     selected_date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
     
     try:
-        # --- QUERY A: STATISTIK (Harian) ---
+        # --- QUERY A: Data Statistik (Hanya Hari Ini / Tanggal Terpilih) ---
+        # Query ini KHUSUS untuk kotak angka (Total Kirim, Terkirim, Dibalas)
         start_stats = f"{selected_date_str}T00:00:00"
         end_stats = f"{selected_date_str}T23:59:59"
         
@@ -38,14 +39,16 @@ def dashboard():
             .execute()
         chats_daily = resp_stats.data
 
-        # --- QUERY B: DATA FOLLOW UP (Global History) ---
+        # --- QUERY B: Data History (Untuk Follow Up) ---
         resp_leads = supabase.table('chats').select("*")\
             .order('created_at', desc=True)\
             .limit(2000)\
             .execute() 
         chats_all_history = resp_leads.data
 
-        # --- QUERY C: PESAN MASUK (Realtime 20 Terakhir) ---
+        # --- QUERY C: REVISI - Pesan Masuk (Realtime/Global) ---
+        # Mengambil 20 balasan terakhir TANPA filter tanggal.
+        # Solusi agar balasan yang telat masuk tetap terlihat di dashboard.
         resp_inbound = supabase.table('chats').select("*")\
             .eq('direction', 'inbound')\
             .order('created_at', desc=True)\
@@ -59,7 +62,7 @@ def dashboard():
         chats_all_history = []
         latest_replies = []
 
-    # --- HITUNG STATISTIK ---
+    # --- HITUNG STATISTIK (Hanya untuk tanggal yang dipilih) ---
     sent_count = 0
     delivered_count = 0 
     reply_count = 0
@@ -76,11 +79,10 @@ def dashboard():
             sent_count += 1
             status = str(c.get('status')).lower()
             nomor = c.get('customer_phone')
-            # Jika status 'delivered' (2) atau 'read' (3), atau orangnya sudah balas => Valid
             if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas_hari_ini:
                 delivered_count += 1
 
-    # --- LOGIKA TARGET FOLLOW-UP (Filter Tanggal) ---
+    # --- LOGIKA TARGET FOLLOW-UP (FILTER BY DATE) ---
     read_leads = []
     latest_per_phone = {}
     
@@ -96,7 +98,6 @@ def dashboard():
             created_at = last_msg.get('created_at', '') 
             msg_date = created_at.split('T')[0] if 'T' in created_at else created_at
             
-            # Kita anggap perlu follow up jika statusnya delivered/read/sent tpi belum dibalas
             is_status_ok = any(s in status for s in ['read', '3', 'delivered', '2', 'sent', '1'])
             is_date_match = (msg_date == selected_date_str)
 
@@ -114,9 +115,10 @@ def dashboard():
         'replied': reply_count
     }
     
+    # KITA PASSING 'latest_replies' bukan 'replies' harian biasa ke tabel respon
     return render_template('dashboard.html', 
                            stats=stats, 
-                           replies=latest_replies, 
+                           replies=latest_replies, # Menggunakan list balasan global
                            read_leads=read_leads, 
                            selected_date=selected_date_str)
 
@@ -168,7 +170,6 @@ def webhook():
 
         if raw_status is not None:
             final_status = str(raw_status).lower()
-            # Mapping status Fonnte ke status kita
             if final_status == '2': final_status = 'delivered'
             elif final_status == '3': final_status = 'read'
             elif final_status == '0': final_status = 'pending'
@@ -176,7 +177,7 @@ def webhook():
 
             updated = False
             
-            # 1. Update by ID
+            # 1. Update by ID (Prioritas Utama)
             if msg_id:
                 try:
                     msg_id_str = str(msg_id).strip()
@@ -187,23 +188,26 @@ def webhook():
                 except Exception as e:
                     print(f"Update ID Error: {e}")
 
-            # 2. Update Fallback (PENTING untuk kasus Offline -> Online)
-            # Saat HP nyala, status berubah jadi 'delivered' (2).
-            # Kode ini mencari pesan terakhir ke nomor tersebut yang statusnya masih 'sent'/'pending'
-            # lalu mengubahnya menjadi status baru.
+            # 2. Update Fallback (REVISI LOGIKA OFFLINE -> ONLINE)
+            # Hanya update pesan jika status sebelumnya 'sent' atau 'pending'
+            # Ini mencegah kita mengupdate pesan yang salah (yang mungkin sudah read)
             if not updated and target_phone:
                 try:
                     target_normalized = normalize_phone(target_phone)
+                    
+                    # Logika: Cari pesan OUTBOUND terakhir ke nomor ini
+                    # Yang statusnya MASIH 'sent' atau 'pending'
+                    # Lalu ubah statusnya.
                     supabase.table('chats').update({'status': final_status})\
                         .eq('customer_phone', target_normalized)\
                         .eq('direction', 'outbound')\
                         .in_('status', ['sent', 'pending', 'unknown'])\
                         .order('created_at', desc=True)\
                         .limit(1).execute()
+                        
                 except Exception as e:
                     print(f"Update Fallback Error: {e}")
 
-        # Logika Pesan Masuk (Inbound)
         sender = data.get('sender')
         message = data.get('message')
         
