@@ -28,6 +28,7 @@ def dashboard():
     
     try:
         # --- QUERY A: Data Statistik (Hanya Hari Ini / Tanggal Terpilih) ---
+        # Query ini KHUSUS untuk kotak angka (Total Kirim, Terkirim, Dibalas)
         start_stats = f"{selected_date_str}T00:00:00"
         end_stats = f"{selected_date_str}T23:59:59"
         
@@ -38,22 +39,30 @@ def dashboard():
             .execute()
         chats_daily = resp_stats.data
 
-        # --- QUERY B: Data History (Untuk Cek Status Terakhir) ---
-        # Kita tetap butuh history agak panjang untuk memastikan dia beneran belum balas (walau beda hari)
-        # Tapi nanti tampilannya akan kita filter sesuai tanggal yang dipilih.
+        # --- QUERY B: Data History (Untuk Follow Up) ---
         resp_leads = supabase.table('chats').select("*")\
             .order('created_at', desc=True)\
             .limit(2000)\
             .execute() 
-        
         chats_all_history = resp_leads.data
+
+        # --- QUERY C: REVISI - Pesan Masuk (Realtime/Global) ---
+        # Mengambil 20 balasan terakhir TANPA filter tanggal.
+        # Solusi agar balasan yang telat masuk tetap terlihat di dashboard.
+        resp_inbound = supabase.table('chats').select("*")\
+            .eq('direction', 'inbound')\
+            .order('created_at', desc=True)\
+            .limit(20)\
+            .execute()
+        latest_replies = resp_inbound.data
 
     except Exception as e:
         print(f"Error Dashboard Data: {e}")
         chats_daily = []
         chats_all_history = []
+        latest_replies = []
 
-    # --- HITUNG STATISTIK (Harian) ---
+    # --- HITUNG STATISTIK (Hanya untuk tanggal yang dipilih) ---
     sent_count = 0
     delivered_count = 0 
     reply_count = 0
@@ -77,25 +86,19 @@ def dashboard():
     read_leads = []
     latest_per_phone = {}
     
-    # 1. Cari pesan terakhir per nomor (dari seluruh history)
     for c in chats_all_history:
         phone = c.get('customer_phone')
         if phone and phone not in latest_per_phone:
             latest_per_phone[phone] = c
 
-    # 2. Filter: Status belum balas DAN Tanggal chat terakhir == Tanggal yang dipilih
     for phone, last_msg in latest_per_phone.items():
         if last_msg.get('direction') == 'outbound':
             status = str(last_msg.get('status')).lower()
             
-            # Ambil tanggal pesan terakhir (format YYYY-MM-DD dari timestamp ISO)
-            created_at = last_msg.get('created_at', '') # Contoh: 2026-01-09T08:00:00
+            created_at = last_msg.get('created_at', '') 
             msg_date = created_at.split('T')[0] if 'T' in created_at else created_at
             
-            # SYARAT 1: Status OK (Sent/Delivered/Read)
             is_status_ok = any(s in status for s in ['read', '3', 'delivered', '2', 'sent', '1'])
-            
-            # SYARAT 2: Tanggal pesan terakhir HARUS SAMA dengan tanggal filter
             is_date_match = (msg_date == selected_date_str)
 
             if is_status_ok and is_date_match:
@@ -112,11 +115,10 @@ def dashboard():
         'replied': reply_count
     }
     
-    replies = [c for c in chats_daily if c.get('direction') == 'inbound']
-    
+    # KITA PASSING 'latest_replies' bukan 'replies' harian biasa ke tabel respon
     return render_template('dashboard.html', 
                            stats=stats, 
-                           replies=replies, 
+                           replies=latest_replies, # Menggunakan list balasan global
                            read_leads=read_leads, 
                            selected_date=selected_date_str)
 
@@ -175,6 +177,7 @@ def webhook():
 
             updated = False
             
+            # 1. Update by ID (Prioritas Utama)
             if msg_id:
                 try:
                     msg_id_str = str(msg_id).strip()
@@ -185,14 +188,23 @@ def webhook():
                 except Exception as e:
                     print(f"Update ID Error: {e}")
 
+            # 2. Update Fallback (REVISI LOGIKA OFFLINE -> ONLINE)
+            # Hanya update pesan jika status sebelumnya 'sent' atau 'pending'
+            # Ini mencegah kita mengupdate pesan yang salah (yang mungkin sudah read)
             if not updated and target_phone:
                 try:
                     target_normalized = normalize_phone(target_phone)
+                    
+                    # Logika: Cari pesan OUTBOUND terakhir ke nomor ini
+                    # Yang statusnya MASIH 'sent' atau 'pending'
+                    # Lalu ubah statusnya.
                     supabase.table('chats').update({'status': final_status})\
                         .eq('customer_phone', target_normalized)\
                         .eq('direction', 'outbound')\
+                        .in_('status', ['sent', 'pending', 'unknown'])\
                         .order('created_at', desc=True)\
                         .limit(1).execute()
+                        
                 except Exception as e:
                     print(f"Update Fallback Error: {e}")
 
