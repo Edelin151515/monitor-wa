@@ -85,14 +85,18 @@ def dashboard():
 
     # Filter siapa yang harus di follow-up
     for phone, last_msg in latest_per_phone.items():
+        # Syarat: Pesan terakhir adalah OUTBOUND (Kita yang kirim, belum dibalas)
         if last_msg.get('direction') == 'outbound':
             status = str(last_msg.get('status')).lower()
-            # Masukkan jika status Read/3 (Sudah dibaca tapi pesan terakhir masih dari kita)
-            if 'read' in status or '3' in status:
+            
+            # UPDATE: Kita melonggarkan filter. 
+            # Menampilkan status 'read', 'delivered' (2), dan 'sent' (1)
+            # Tujuannya agar nomor yang belum balas TETAP MUNCUL meskipun centang birunya mati/webhook delay.
+            if any(s in status for s in ['read', '3', 'delivered', '2', 'sent', '1']):
                 read_leads.append({
                     'phone': phone,
                     'msg': last_msg.get('message'),
-                    'status': status,
+                    'status': status, # Nanti di dashboard akan kelihatan status aslinya apa
                     'time': last_msg.get('created_at')
                 })
 
@@ -217,3 +221,4 @@ def webhook():
         traceback.print_exc()
 
     return "OK", 200
+
