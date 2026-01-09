@@ -28,7 +28,6 @@ def dashboard():
     
     try:
         # --- QUERY A: Data Statistik (Hanya Hari Ini / Tanggal Terpilih) ---
-        # Query ini KHUSUS untuk kotak angka (Total Kirim, Terkirim, Dibalas)
         start_stats = f"{selected_date_str}T00:00:00"
         end_stats = f"{selected_date_str}T23:59:59"
         
@@ -40,15 +39,14 @@ def dashboard():
         chats_daily = resp_stats.data
 
         # --- QUERY B: Data History (Untuk Follow Up) ---
+        # Ambil 2000 pesan terakhir untuk pengecekan status akhir
         resp_leads = supabase.table('chats').select("*")\
             .order('created_at', desc=True)\
             .limit(2000)\
             .execute() 
         chats_all_history = resp_leads.data
 
-        # --- QUERY C: REVISI - Pesan Masuk (Realtime/Global) ---
-        # Mengambil 20 balasan terakhir TANPA filter tanggal.
-        # Solusi agar balasan yang telat masuk tetap terlihat di dashboard.
+        # --- QUERY C: Pesan Masuk (Realtime/Global) ---
         resp_inbound = supabase.table('chats').select("*")\
             .eq('direction', 'inbound')\
             .order('created_at', desc=True)\
@@ -63,10 +61,11 @@ def dashboard():
         latest_replies = []
 
     # --- HITUNG STATISTIK (Hanya untuk tanggal yang dipilih) ---
-    sent_count = 0
-    delivered_count = 0 
-    reply_count = 0
+    sent_count = 0      # Total Kirim
+    delivered_count = 0 # Terkirim (Valid)
+    reply_count = 0     # Dibalas
     
+    # 1. Cek nomor yang sudah balas hari ini (untuk validasi silang)
     nomor_yang_balas_hari_ini = set()
     for c in chats_daily:
         if c.get('direction') == 'inbound':
@@ -74,18 +73,27 @@ def dashboard():
             if c.get('customer_phone'):
                 nomor_yang_balas_hari_ini.add(c.get('customer_phone'))
 
+    # 2. Hitung Pesan Keluar
     for c in chats_daily:
         if c.get('direction') == 'outbound':
-            sent_count += 1
+            sent_count += 1 # ✅ Total Kirim = Hitung SEMUA pesan keluar (termasuk offline/sent)
+            
             status = str(c.get('status')).lower()
             nomor = c.get('customer_phone')
-            if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas_hari_ini:
+            
+            # ✅ Terkirim (Valid) = Hanya Delivered (2) atau Read (3)
+            # EXCLUDE: 'sent', '1', 'pending', '0' (Pesan offline tidak dihitung valid)
+            is_valid_status = any(s in status for s in ['delivered', '2', 'read', '3'])
+            
+            # Jika status valid ATAU dia membalas (berarti pasti sampai), baru hitung delivered
+            if is_valid_status or nomor in nomor_yang_balas_hari_ini:
                 delivered_count += 1
 
     # --- LOGIKA TARGET FOLLOW-UP (FILTER BY DATE) ---
     read_leads = []
     latest_per_phone = {}
     
+    # Ambil pesan terakhir per nomor
     for c in chats_all_history:
         phone = c.get('customer_phone')
         if phone and phone not in latest_per_phone:
@@ -98,7 +106,12 @@ def dashboard():
             created_at = last_msg.get('created_at', '') 
             msg_date = created_at.split('T')[0] if 'T' in created_at else created_at
             
-            is_status_ok = any(s in status for s in ['read', '3', 'delivered', '2', 'sent', '1'])
+            # ✅ FOLLOW-UP STRICT FILTER:
+            # HANYA masukkan jika status 'read' atau 'delivered'.
+            # HAPUS 'sent' dan '1' dari list ini agar HP offline tidak masuk list tagihan.
+            is_status_ok = any(s in status for s in ['read', '3', 'delivered', '2'])
+            
+            # Filter tanggal harus sama dengan dashboard
             is_date_match = (msg_date == selected_date_str)
 
             if is_status_ok and is_date_match:
@@ -115,10 +128,9 @@ def dashboard():
         'replied': reply_count
     }
     
-    # KITA PASSING 'latest_replies' bukan 'replies' harian biasa ke tabel respon
     return render_template('dashboard.html', 
                            stats=stats, 
-                           replies=latest_replies, # Menggunakan list balasan global
+                           replies=latest_replies, 
                            read_leads=read_leads, 
                            selected_date=selected_date_str)
 
@@ -177,61 +189,6 @@ def webhook():
 
             updated = False
             
-            # 1. Update by ID (Prioritas Utama)
+            # 1. Update by ID (Prioritas)
             if msg_id:
                 try:
-                    msg_id_str = str(msg_id).strip()
-                    res = supabase.table('chats').update({'status': final_status})\
-                        .eq('fonnte_id', msg_id_str).execute()
-                    if res.data and len(res.data) > 0:
-                        updated = True
-                except Exception as e:
-                    print(f"Update ID Error: {e}")
-
-            # 2. Update Fallback (REVISI LOGIKA OFFLINE -> ONLINE)
-            # Hanya update pesan jika status sebelumnya 'sent' atau 'pending'
-            # Ini mencegah kita mengupdate pesan yang salah (yang mungkin sudah read)
-            if not updated and target_phone:
-                try:
-                    target_normalized = normalize_phone(target_phone)
-                    
-                    # Logika: Cari pesan OUTBOUND terakhir ke nomor ini
-                    # Yang statusnya MASIH 'sent' atau 'pending'
-                    # Lalu ubah statusnya.
-                    supabase.table('chats').update({'status': final_status})\
-                        .eq('customer_phone', target_normalized)\
-                        .eq('direction', 'outbound')\
-                        .in_('status', ['sent', 'pending', 'unknown'])\
-                        .order('created_at', desc=True)\
-                        .limit(1).execute()
-                        
-                except Exception as e:
-                    print(f"Update Fallback Error: {e}")
-
-        sender = data.get('sender')
-        message = data.get('message')
-        
-        if sender and message:
-            sender = normalize_phone(sender)
-            try:
-                existing = supabase.table('chats').select('id')\
-                    .eq('message', message)\
-                    .eq('customer_phone', sender)\
-                    .eq('direction', 'inbound')\
-                    .limit(1).execute()
-                
-                if not existing.data:
-                    supabase.table('chats').insert({
-                        "customer_phone": sender,
-                        "message": message,
-                        "direction": "inbound",
-                        "status": "received"
-                    }).execute()
-            except Exception as e:
-                print(f"Error Save Inbound: {e}")
-                
-    except Exception as e:
-        print(f"Webhook Error: {e}")
-        traceback.print_exc()
-
-    return "OK", 200
