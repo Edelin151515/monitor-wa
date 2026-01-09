@@ -38,9 +38,9 @@ def dashboard():
             .execute()
         chats_daily = resp_stats.data
 
-        # --- QUERY B: Data Follow Up (REALTIME / ALL TIME) ---
-        # Mengambil 2000 pesan terakhir tanpa batasan tanggal
-        # Agar yang chat minggu lalu tapi belum balas tetap muncul
+        # --- QUERY B: Data History (Untuk Cek Status Terakhir) ---
+        # Kita tetap butuh history agak panjang untuk memastikan dia beneran belum balas (walau beda hari)
+        # Tapi nanti tampilannya akan kita filter sesuai tanggal yang dipilih.
         resp_leads = supabase.table('chats').select("*")\
             .order('created_at', desc=True)\
             .limit(2000)\
@@ -73,30 +73,36 @@ def dashboard():
             if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas_hari_ini:
                 delivered_count += 1
 
-    # --- LOGIKA TARGET FOLLOW-UP (Berdasarkan History Lengkap) ---
+    # --- LOGIKA TARGET FOLLOW-UP (FILTER BY DATE) ---
     read_leads = []
     latest_per_phone = {}
     
-    # Ambil chat terakhir per nomor
+    # 1. Cari pesan terakhir per nomor (dari seluruh history)
     for c in chats_all_history:
         phone = c.get('customer_phone')
         if phone and phone not in latest_per_phone:
             latest_per_phone[phone] = c
 
-    # Filter siapa yang harus di follow-up
+    # 2. Filter: Status belum balas DAN Tanggal chat terakhir == Tanggal yang dipilih
     for phone, last_msg in latest_per_phone.items():
-        # Syarat: Pesan terakhir adalah OUTBOUND (Kita yang kirim, belum dibalas)
         if last_msg.get('direction') == 'outbound':
             status = str(last_msg.get('status')).lower()
             
-            # UPDATE: Kita melonggarkan filter. 
-            # Menampilkan status 'read', 'delivered' (2), dan 'sent' (1)
-            # Tujuannya agar nomor yang belum balas TETAP MUNCUL meskipun centang birunya mati/webhook delay.
-            if any(s in status for s in ['read', '3', 'delivered', '2', 'sent', '1']):
+            # Ambil tanggal pesan terakhir (format YYYY-MM-DD dari timestamp ISO)
+            created_at = last_msg.get('created_at', '') # Contoh: 2026-01-09T08:00:00
+            msg_date = created_at.split('T')[0] if 'T' in created_at else created_at
+            
+            # SYARAT 1: Status OK (Sent/Delivered/Read)
+            is_status_ok = any(s in status for s in ['read', '3', 'delivered', '2', 'sent', '1'])
+            
+            # SYARAT 2: Tanggal pesan terakhir HARUS SAMA dengan tanggal filter
+            is_date_match = (msg_date == selected_date_str)
+
+            if is_status_ok and is_date_match:
                 read_leads.append({
                     'phone': phone,
                     'msg': last_msg.get('message'),
-                    'status': status, # Nanti di dashboard akan kelihatan status aslinya apa
+                    'status': status,
                     'time': last_msg.get('created_at')
                 })
 
@@ -156,7 +162,6 @@ def webhook():
         if not data: 
             return "OK", 200
 
-        # --- LOGIKA UPDATE STATUS (Fix untuk Read) ---
         msg_id = data.get('stateid') or data.get('id')
         raw_status = data.get('state') or data.get('status')
         target_phone = data.get('target')
@@ -170,7 +175,6 @@ def webhook():
 
             updated = False
             
-            # 1. Update by ID
             if msg_id:
                 try:
                     msg_id_str = str(msg_id).strip()
@@ -181,7 +185,6 @@ def webhook():
                 except Exception as e:
                     print(f"Update ID Error: {e}")
 
-            # 2. Update Fallback (Jika ID gagal)
             if not updated and target_phone:
                 try:
                     target_normalized = normalize_phone(target_phone)
@@ -193,7 +196,6 @@ def webhook():
                 except Exception as e:
                     print(f"Update Fallback Error: {e}")
 
-        # --- LOGIKA PESAN MASUK ---
         sender = data.get('sender')
         message = data.get('message')
         
@@ -221,4 +223,3 @@ def webhook():
         traceback.print_exc()
 
     return "OK", 200
-
