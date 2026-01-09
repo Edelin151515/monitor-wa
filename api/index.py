@@ -69,8 +69,8 @@ def dashboard():
         if c.get('direction') == 'outbound':
             sent_count += 1
             status = str(c.get('status')).lower()
-            nomor = c.get('customer_phone')
-            if any(s in status for s in ['delivered', '2', 'read', '3']) or nomor in nomor_yang_balas_hari_ini:
+            # Hanya hitung jika status DELIVERED atau READ (exclude sent/pending)
+            if any(s in status for s in ['delivered', '2', 'read', '3']):
                 delivered_count += 1
 
     # --- LOGIKA TARGET FOLLOW-UP (FILTER BY DATE) ---
